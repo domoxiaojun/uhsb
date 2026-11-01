@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cftest web</title>
+<style>
+:root {
+  --bg: #f6f4ef;
+  --card: #fff;
+  --ink: #2c2c2a;
+  --muted: #5f5e5a;
+  --line: #d3d1c7;
+  --blue: #185fa5;
+  --blue-bg: #e6f1fb;
+  --ok: #0f6e56;
+  --warn: #854f0b;
+  --err: #a32d2d;
+  --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.5 var(--font); color: var(--ink); background: var(--bg); }
+header { padding: 16px 24px 8px; }
+h1 { margin: 0; font-size: 18px; font-weight: 600; }
+.sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 0 24px 24px; }
+@media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+input, select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.actions { display: flex; gap: 8px; margin-top: 16px; }
+button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor: pointer; }
+.primary { background: var(--blue); color: #fff; }
+.ghost { background: var(--blue-bg); color: var(--blue); }
+.status { font-size: 12px; color: var(--muted); margin-top: 10px; }
+.log { height: 280px; overflow: auto; background: #1e1e1c; color: #e8e6dc; font: 12px/1.45 var(--mono); padding: 12px; border-radius: 8px; white-space: pre-wrap; }
+.hits { width: 100%; border-collapse: collapse; font-size: 12px; }
+.hits th, .hits td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.hits th { color: var(--muted); font-weight: 500; }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; }
+.ok { background: #e1f5ee; color: var(--ok); }
+.warn { background: #faeeda; color: var(--warn); }
+.err { background: #fcebeb; color: var(--err); }
+.files a { display: inline-block; margin: 0 8px 8px 0; color: var(--blue); }
+</style>
+</head>
+<body>
+<header>
+  <h1>cftest 本地控制台</h1>
+  <div class="sub" id="meta">加载中…</div>
+</header>
+<main>
+  <section class="card">
+    <label>cfdata 模式</label>
+    <select id="mode">
+      <option value="1">1 · 指定 colo 扫描</option>
+      <option value="2">2 · 筛固定 colo</option>
+      <option value="3">3 · 按国家筛</option>
+    </select>
+    <label>目标 colo / 国家</label>
+    <input id="target" value="HKG,NRT" placeholder="HKG,NRT 或 HK,JP">
+    <div class="row">
+      <div><label>IP 类型</label>
+        <select id="iptype"><option value="4">IPv4</option><option value="6">IPv6</option></select>
+      </div>
+      <div><label>每 colo 数量</label><input id="num" type="number" value="8"></div>
+    </div>
+    <div class="row">
+      <div><label>测速大小 MB</label><input id="size" type="number" value="50"></div>
+      <div><label>最低 Mbps</label><input id="speed" type="number" value="50"></div>
+    </div>
+    <label><input id="detail" type="checkbox" checked> cfdata 详细延迟测试</label>
+    <label><input id="skipscan" type="checkbox"> 跳过 cfscan（Windows 默认建议勾）</label>
+    <label><input id="connect" type="checkbox"> 追加 cfconnectivity 复核</label>
+    <label><input id="singbox" type="checkbox"> 经 sing-box 测 VMess+WS</label>
+    <label>VMess UUID</label>
+    <input id="uuid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+    <label>WS Host / SNI</label>
+    <input id="wshost" placeholder="your.domain.com">
+    <div class="row">
+      <div><label>WS Path</label><input id="wspath" value="/"></div>
+      <div><label>端口</label><input id="vmessport" type="number" value="443"></div>
+    </div>
+    <label><input id="vmesstls" type="checkbox" checked> TLS</label>
+    <div class="actions">
+      <button class="primary" id="start">开始流水线</button>
+      <button class="ghost" id="stop">停止</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+  <section>
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <strong>实时日志</strong>
+        <span class="pill" id="busy">空闲</span>
+      </div>
+      <div class="log" id="log"></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <strong>命中 / 测速结果</strong>
+      <table class="hits"><thead><tr><th>阶段</th><th>IP</th><th>信息</th></tr></thead><tbody id="hits"></tbody></table>
+    </div>
+    <div class="card">
+      <strong>运行历史</strong>
+      <div id="runs" class="files"></div>
+      <div id="files" class="files"></div>
+    </div>
+  </section>
+</main>
+<script>
+const logEl = document.getElementById('log');
+const hitsEl = document.getElementById('hits');
+const statusEl = document.getElementById('status');
+const busyEl = document.getElementById('busy');
+const metaEl = document.getElementById('meta');
+let defaultsApplied = false;
+
+function line(text) {
+  logEl.textContent += text + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function refreshStatus() {
+  const s = await (await fetch('/api/status')).json();
+  metaEl.textContent = `v${s.version} · ${s.goos} · ${s.root}`
+    + (s.mtr ? ' · mtr 可用' : ' · 无 mtr，建议跳过 cfscan')
+    + (s.singbox ? ' · sing-box 可用' : ' · 未检测到 sing-box');
+  busyEl.textContent = s.busy ? '运行中' : '空闲';
+  busyEl.className = 'pill ' + (s.busy ? 'warn' : 'ok');
+  if (!s.mtr) document.getElementById('skipscan').checked = true;
+  if (!defaultsApplied && s.defaults) {
+    defaultsApplied = true;
+    if (s.defaults.uuid) document.getElementById('uuid').value = s.defaults.uuid;
+    if (s.defaults.host) document.getElementById('wshost').value = s.defaults.host;
+    if (s.defaults.path) document.getElementById('wspath').value = s.defaults.path;
+    if (s.defaults.port) document.getElementById('vmessport').value = s.defaults.port;
+    document.getElementById('vmesstls').checked = !!s.defaults.tls;
+    if (s.singbox && s.defaults.uuid && s.defaults.host) {
+      document.getElementById('singbox').checked = true;
+    }
+  }
+  if (s.error) statusEl.textContent = s.error;
+  if (s.runDir) statusEl.textContent = '最近运行: ' + s.runDir;
+  return s;
+}
+
+async function refreshRuns() {
+  const names = await (await fetch('/api/runs')).json();
+  const box = document.getElementById('runs');
+  box.innerHTML = '';
+  (names || []).slice(0, 12).forEach(name => {
+    const a = document.createElement('a');
+    a.href = '#';
+    a.textContent = name;
+    a.onclick = async (e) => {
+      e.preventDefault();
+      const files = await (await fetch('/api/files?run=' + encodeURIComponent(name))).json();
+      const fbox = document.getElementById('files');
+      fbox.innerHTML = '';
+      (files || []).forEach(file => {
+        const fa = document.createElement('a');
+        fa.href = '/api/files?run=' + encodeURIComponent(name) + '&file=' + encodeURIComponent(file);
+        fa.textContent = file;
+        fa.target = '_blank';
+        fbox.appendChild(fa);
+      });
+    };
+    box.appendChild(a);
+  });
+}
+
+document.getElementById('start').onclick = async () => {
+  const mode = document.getElementById('mode').value;
+  const target = document.getElementById('target').value;
+  const body = {
+    DataMode: mode,
+    Colo: mode === '3' ? '' : target,
+    Country: mode === '3' ? target : '',
+    IPType: document.getElementById('iptype').value,
+    NumPerColo: Number(document.getElementById('num').value),
+    Detail: document.getElementById('detail').checked,
+    SkipScan: document.getElementById('skipscan').checked,
+    RunConnect: document.getElementById('connect').checked,
+    SpeedSize: Number(document.getElementById('size').value),
+    SpeedMinMbps: Number(document.getElementById('speed').value),
+    UseSingBox: document.getElementById('singbox').checked,
+    VMessUUID: document.getElementById('uuid').value,
+    VMessHost: document.getElementById('wshost').value,
+    VMessPath: document.getElementById('wspath').value,
+    VMessSNI: document.getElementById('wshost').value,
+    VMessPort: Number(document.getElementById('vmessport').value),
+    VMessTLS: document.getElementById('vmesstls').checked,
+  };
+  const res = await fetch('/api/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!res.ok) { statusEl.textContent = await res.text(); return; }
+  statusEl.textContent = '已启动';
+  refreshStatus();
+};
+
+document.getElementById('stop').onclick = async () => {
+  await fetch('/api/stop', { method: 'POST' });
+};
+
+const es = new EventSource('/api/events');
+es.onmessage = (ev) => {
+  const e = JSON.parse(ev.data);
+  if (e.message) line((e.stage ? '[' + e.stage + '] ' : '') + e.message);
+  if ((e.kind === 'hit' || e.kind === 'result') && e.ip) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${e.stage || ''}</td><td>${e.ip}</td><td>${e.message || ''}</td>`;
+    hitsEl.prepend(tr);
+  }
+  if (e.kind === 'done') { refreshStatus(); refreshRuns(); }
+};
+
+refreshStatus();
+refreshRuns();
+setInterval(refreshStatus, 4000);
+</script>
+</body>
+</html>

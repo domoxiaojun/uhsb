@@ -1,0 +1,38 @@
+# binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# go
+*.test
+*.out
+vendor/
+
+# runtime data
+/data/*
+!/data/.gitkeep
+/runs/
+*.tmp
+*.bak
+ips-v6.txt
+cfdata/ips-v4.txt
+cfdata/ips-v6.txt
+speed_test_results.csv
+
+# env / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# editors / os
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.workbuddy/
+*.swp

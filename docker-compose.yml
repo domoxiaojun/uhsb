@@ -1,0 +1,27 @@
+services:
+  cftest:
+    image: ${CFTEST_IMAGE:-cftest:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cftest
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CFWEB_ADDR: 0.0.0.0:8787
+      CFWEB_OPEN: "false"
+      CFWEB_ROOT: /data
+    volumes:
+      - ./data:/data
+      - ./locations.json:/app/locations.json:ro
+    cap_add:
+      - NET_RAW
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
