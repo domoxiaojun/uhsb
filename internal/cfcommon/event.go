@@ -115,11 +115,19 @@ func NewHub() *Hub {
 	return &Hub{subs: make(map[chan Event]struct{})}
 }
 
+func (h *Hub) Reset() {
+	h.mu.Lock()
+	h.log = nil
+	h.mu.Unlock()
+}
+
 func (h *Hub) Publish(e Event) {
 	h.mu.Lock()
-	h.log = append(h.log, e)
-	if len(h.log) > 4000 {
-		h.log = h.log[len(h.log)-3000:]
+	if e.Kind != KindProgress {
+		h.log = append(h.log, e)
+		if len(h.log) > 4000 {
+			h.log = h.log[len(h.log)-3000:]
+		}
 	}
 	targets := make([]chan Event, 0, len(h.subs))
 	for ch := range h.subs {

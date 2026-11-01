@@ -175,6 +175,16 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	applyVMessEnv(&req)
+	if req.UseSingBox {
+		if strings.TrimSpace(req.VMessUUID) == "" || strings.TrimSpace(req.VMessHost) == "" {
+			http.Error(w, "启用 sing-box 时必须填写 UUID 和 WS Host", http.StatusBadRequest)
+			return
+		}
+		if _, ok := singbox.Available(""); !ok {
+			http.Error(w, "未检测到 sing-box 内核", http.StatusBadRequest)
+			return
+		}
+	}
 
 	s.mu.Lock()
 	if s.busy {
@@ -185,6 +195,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 	s.busy = true
 	s.err = ""
 	s.runDir = ""
+	s.hub.Reset()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.mu.Unlock()

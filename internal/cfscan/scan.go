@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -17,9 +18,9 @@ import (
 )
 
 const (
-	CMIHK = "223.119.6.101"
-	CMIJP = "223.118.4.105"
-	CMIUS = "221.183.137.177"
+	CMIHK       = "223.119.6.101"
+	CMIJP       = "223.118.4.105"
+	CMIUS       = "221.183.137.177"
 	DefaultHost = "www.visa.cn"
 )
 
@@ -69,15 +70,30 @@ type Result struct {
 	MissedFile  string
 }
 
+func findMTR() (string, error) {
+	for _, name := range []string{"mtr", "mtr-tiny"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return p, nil
+		}
+	}
+	for _, p := range []string{"/usr/bin/mtr", "/usr/sbin/mtr", "/usr/bin/mtr-tiny", "/usr/sbin/mtr-tiny"} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("mtr 未安装。请: sudo apt install mtr / brew install mtr")
+}
+
 func MTRAvailable() bool {
-	_, err := exec.LookPath("mtr")
+	_, err := findMTR()
 	return err == nil
 }
 
 func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, error) {
 	cfg = cfg.withDefaults()
-	if !MTRAvailable() {
-		return nil, fmt.Errorf("mtr 未安装。请: sudo apt install mtr / brew install mtr")
+	mtrBin, err := findMTR()
+	if err != nil {
+		return nil, err
 	}
 
 	locMap, err := cfcommon.LoadLocations()
@@ -140,13 +156,19 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 						case <-time.After(time.Second):
 						}
 					}
-					if r, ok := analyzeIP(ctx, cfg, locMap, ip); ok {
+					if r, ok := analyzeIP(ctx, cfg, locMap, mtrBin, ip); ok {
 						if liveSaver != nil {
 							liveSaver.WriteResult(r)
 						}
 						results <- r
 						found = true
 						progress.Hit(fmt.Sprintf("%s → %s", r.IP, r.Keyword))
+						reporter.Emit(cfcommon.Event{
+							Stage:   "cfscan",
+							Kind:    cfcommon.KindHit,
+							Message: fmt.Sprintf("%s → %s", r.IP, r.Keyword),
+							IP:      r.IP,
+						})
 						break
 					}
 				}
@@ -218,7 +240,7 @@ feed:
 	return out, nil
 }
 
-func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Location, ip string) (CategorizedResult, bool) {
+func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Location, mtrBin, ip string) (CategorizedResult, bool) {
 	result := CategorizedResult{IP: ip}
 
 	var directCMI string
@@ -231,7 +253,7 @@ func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Locat
 		directCMI = "cmi-us"
 	}
 
-	cmd := exec.CommandContext(ctx, "mtr", "-r",
+	cmd := exec.CommandContext(ctx, mtrBin, "-r",
 		"-c", strconv.Itoa(cfg.MTRCycles),
 		"--timeout", strconv.Itoa(cfg.MTRTimeout), ip)
 

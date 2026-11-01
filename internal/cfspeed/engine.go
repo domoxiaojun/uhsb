@@ -155,14 +155,14 @@ type TestResult struct {
 }
 
 type Result struct {
-	Results      []TestResult
-	Premium      []TestResult
-	ResultsCSV   string
-	PremiumFile  string
-	ReportFile   string
-	HistoryFile  string
-	VMessFile    string
-	ClientJSON   string
+	Results     []TestResult
+	Premium     []TestResult
+	ResultsCSV  string
+	PremiumFile string
+	ReportFile  string
+	HistoryFile string
+	VMessFile   string
+	ClientJSON  string
 }
 
 func NormalizeMode(mode string) string {
@@ -226,7 +226,7 @@ type session struct {
 	box      *singbox.Manager
 }
 
-func newSession(cfg Config, reporter cfcommon.Reporter) *session {
+func newSession(cfg Config, reporter cfcommon.Reporter) (*session, error) {
 	s := &session{cfg: cfg, reporter: reporter}
 	if m, err := cfcommon.LoadLocations(); err != nil {
 		reporter.Warn("cfspeed", "%v", err)
@@ -247,27 +247,25 @@ func newSession(cfg Config, reporter cfcommon.Reporter) *session {
 		}
 	}
 	if cfg.UseSingBox {
-		if cfg.VMessUUID == "" || cfg.VMessHost == "" {
-			reporter.Warn("cfspeed", "已开 sing-box 但缺少 -uuid / -ws-host，回退直连测速")
-		} else {
-			mgr, err := singbox.NewManager(singbox.Config{
-				Binary:  cfg.SingBoxBinary,
-				WorkDir: cfg.SingBoxWorkDir,
-			})
-			if err != nil {
-				reporter.Warn("cfspeed", "sing-box 不可用,回退直连测速: %v", err)
-			} else {
-				s.box = mgr
-				reporter.Log("cfspeed", "[信息] 测速走 sing-box VMess+WS (%s) host=%s path=%s tls=%v",
-					mgr.Binary(), cfg.VMessHost, cfg.VMessPath, cfg.VMessTLS)
-				if s.cfg.Workers > 6 {
-					reporter.Warn("cfspeed", "sing-box 测速并发从 %d 降到 6，避免本机拉起过多内核", s.cfg.Workers)
-					s.cfg.Workers = 6
-				}
-			}
+		if strings.TrimSpace(cfg.VMessUUID) == "" || strings.TrimSpace(cfg.VMessHost) == "" {
+			return nil, fmt.Errorf("已启用 sing-box，必须提供 UUID 和 WS Host，拒绝回退直连")
+		}
+		mgr, err := singbox.NewManager(singbox.Config{
+			Binary:  cfg.SingBoxBinary,
+			WorkDir: cfg.SingBoxWorkDir,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("sing-box 不可用: %w", err)
+		}
+		s.box = mgr
+		reporter.Log("cfspeed", "[信息] 测速走 sing-box VMess+WS (%s) host=%s path=%s tls=%v",
+			mgr.Binary(), cfg.VMessHost, cfg.VMessPath, cfg.VMessTLS)
+		if s.cfg.Workers > 6 {
+			reporter.Warn("cfspeed", "sing-box 测速并发从 %d 降到 6，避免本机拉起过多内核", s.cfg.Workers)
+			s.cfg.Workers = 6
 		}
 	}
-	return s
+	return s, nil
 }
 
 func (s *session) close() {
@@ -471,10 +469,13 @@ func (s *session) testBatchCandidate(ctx context.Context, ip string) (TestResult
 }
 
 func runBatch(ctx context.Context, cfg Config, ips []string, reporter cfcommon.Reporter) (*Result, error) {
-	s := newSession(cfg, reporter)
+	s, err := newSession(cfg, reporter)
+	if err != nil {
+		return nil, err
+	}
 	defer s.close()
 
-	saver, err := newBatchOutputSaver(cfg)
+	saver, err := newBatchOutputSaver(s.cfg)
 	if err != nil {
 		reporter.Warn("cfspeed", "无法启用批量结果实时保存: %v", err)
 	}
@@ -482,7 +483,7 @@ func runBatch(ctx context.Context, cfg Config, ips []string, reporter cfcommon.R
 	var results []TestResult
 	var mu sync.Mutex
 	progress := cfcommon.NewProgressWithHandler(len(ips), 500*time.Millisecond, reporter.ProgressHandler("cfspeed"))
-	sem := make(chan struct{}, cfg.Workers)
+	sem := make(chan struct{}, s.cfg.Workers)
 	var wg sync.WaitGroup
 
 launch:
@@ -557,7 +558,10 @@ type latencyProbe struct {
 }
 
 func runOptimize(ctx context.Context, cfg Config, ips []string, reporter cfcommon.Reporter) (*Result, error) {
-	s := newSession(cfg, reporter)
+	s, err := newSession(cfg, reporter)
+	if err != nil {
+		return nil, err
+	}
 	defer s.close()
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("IP列表为空")
@@ -571,7 +575,7 @@ func runOptimize(ctx context.Context, cfg Config, ips []string, reporter cfcommo
 	var candidates []latencyProbe
 	var mu sync.Mutex
 	var completed atomic.Int64
-	sem := make(chan struct{}, cfg.Workers)
+	sem := make(chan struct{}, s.cfg.Workers)
 	var wg sync.WaitGroup
 	progress := cfcommon.NewProgressWithHandler(len(ips), 500*time.Millisecond, reporter.ProgressHandler("cfspeed"))
 
@@ -634,7 +638,10 @@ launch:
 }
 
 func runSingle(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, error) {
-	s := newSession(cfg, reporter)
+	s, err := newSession(cfg, reporter)
+	if err != nil {
+		return nil, err
+	}
 	defer s.close()
 	ip := strings.TrimSpace(cfg.SingleIP)
 	if ip == "" {

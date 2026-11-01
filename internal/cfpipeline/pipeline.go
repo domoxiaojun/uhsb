@@ -17,34 +17,34 @@ import (
 )
 
 type Config struct {
-	DataMode       string
-	Colo           string
-	Country        string
-	IPType         string
-	ScanThreads    int
-	TestThreads    int
-	Port           int
-	Delay          int
-	NumPerColo     int
-	Detail         bool
-	SkipScan       bool
-	RunConnect     bool
-	SpeedMode      string
-	SpeedProtocol  string
-	SpeedSize      int
-	SpeedWorkers   int
-	SpeedRounds    int
-	SpeedTimeout   int
-	SpeedLoss      float64
-	SpeedMinMbps   float64
-	SpeedLatency   int
-	ConnWorkers    int
-	ConnRounds     int
-	ConnTimeout    int
-	ConnLoss       float64
-	ConnSpeed      float64
-	ConnLatency    int
-	ConnSize       int
+	DataMode           string
+	Colo               string
+	Country            string
+	IPType             string
+	ScanThreads        int
+	TestThreads        int
+	Port               int
+	Delay              int
+	NumPerColo         int
+	Detail             bool
+	SkipScan           bool
+	RunConnect         bool
+	SpeedMode          string
+	SpeedProtocol      string
+	SpeedSize          int
+	SpeedWorkers       int
+	SpeedRounds        int
+	SpeedTimeout       int
+	SpeedLoss          float64
+	SpeedMinMbps       float64
+	SpeedLatency       int
+	ConnWorkers        int
+	ConnRounds         int
+	ConnTimeout        int
+	ConnLoss           float64
+	ConnSpeed          float64
+	ConnLatency        int
+	ConnSize           int
 	HostHeader         string
 	RootDir            string
 	RunsDir            string
@@ -202,19 +202,22 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 		}
 	} else {
 		prefix := filepath.Join(runDir, tag)
+		scanWorkers := 16
 		scanRes, err := cfscan.Run(ctx, cfscan.Config{
 			InputFile:  ipsFile,
 			OutputPfx:  prefix,
 			HostHeader: cfg.HostHeader,
+			Workers:    scanWorkers,
 		}, reporter)
 		if err != nil {
 			return out, err
 		}
 		out.Scan = scanRes
-		if scanRes != nil && scanRes.QualityFile != "" {
-			speedInput = scanRes.QualityFile
-			out.QualityFile = scanRes.QualityFile
+		if scanRes == nil || scanRes.QualityFile == "" || len(scanRes.Hits) == 0 {
+			return out, fmt.Errorf("cfscan 未产出质量 IP（命中 0），已停止测速，避免改测 cfdata 全量")
 		}
+		speedInput = scanRes.QualityFile
+		out.QualityFile = scanRes.QualityFile
 	}
 	if ctx.Err() != nil {
 		return out, ctx.Err()
