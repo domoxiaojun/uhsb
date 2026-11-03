@@ -26,6 +26,8 @@ type Config struct {
 	IPv6PerSubnet int
 	HostHeader    string
 	WorkDir       string
+	CacheDir      string
+	MaxAge        time.Duration
 	IPv4URL       string
 	IPv6URL       string
 }
@@ -51,6 +53,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.HostHeader == "" {
 		c.HostHeader = DefaultHost
+	}
+	if c.MaxAge == 0 {
+		c.MaxAge = 24 * time.Hour
 	}
 	if c.IPv4URL == "" {
 		c.IPv4URL = DefaultIPv4URL

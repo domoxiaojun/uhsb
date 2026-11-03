@@ -66,10 +66,10 @@ func (c Config) withDefaults() Config {
 	if c.MaxLatency <= 0 {
 		c.MaxLatency = 200
 	}
-	if c.MaxPacketLoss == 0 {
+	if c.MaxPacketLoss < 0 {
 		c.MaxPacketLoss = 10
 	}
-	if c.MinSpeed == 0 {
+	if c.MinSpeed < 0 {
 		c.MinSpeed = 100
 	}
 	return c

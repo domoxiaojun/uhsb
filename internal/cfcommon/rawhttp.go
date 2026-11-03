@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -69,7 +70,7 @@ func MeasureDownloadSpeed(ctx context.Context, ip, targetURL string, timeout tim
 	if err != nil {
 		return 0, 0, err
 	}
-	return measureDownloadWithClient(ctx, client, targetURL, timeout, limitBytes, earlyCheck, minMbps, bufferSize)
+	return measureDownloadWithClient(ctx, client, targetURL, limitBytes, earlyCheck, minMbps, bufferSize)
 }
 
 // MeasureDownloadSpeedViaProxy 经本地 HTTP/SOCKS 代理下载测速。
@@ -86,10 +87,10 @@ func MeasureDownloadSpeedViaProxy(ctx context.Context, proxyURL, targetURL strin
 		},
 		Timeout: timeout,
 	}
-	return measureDownloadWithClient(ctx, client, targetURL, timeout, limitBytes, earlyCheck, minMbps, bufferSize)
+	return measureDownloadWithClient(ctx, client, targetURL, limitBytes, earlyCheck, minMbps, bufferSize)
 }
 
-func measureDownloadWithClient(ctx context.Context, client *http.Client, targetURL string, timeout time.Duration,
+func measureDownloadWithClient(ctx context.Context, client *http.Client, targetURL string,
 	limitBytes int64, earlyCheck time.Duration, minMbps float64, bufferSize int) (float64, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
@@ -99,6 +100,9 @@ func measureDownloadWithClient(ctx context.Context, client *http.Client, targetU
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, 0, ctxErr
+		}
 		return 0, 0, err
 	}
 	defer resp.Body.Close()
@@ -119,48 +123,56 @@ func measureDownloadWithClient(ctx context.Context, client *http.Client, targetU
 	var downloaded int64
 	earlyChecked := false
 
-	for {
-		select {
-		case <-ctx.Done():
-			if downloaded == 0 {
-				return 0, downloaded, ctx.Err()
-			}
-			elapsed := time.Since(start)
-			if elapsed <= 0 {
-				return 0, downloaded, ctx.Err()
-			}
-			return float64(downloaded) * 8 / elapsed.Seconds() / 1e6, downloaded, ctx.Err()
-		default:
-		}
-
-		n, err := reader.Read(buf)
-		downloaded += int64(n)
-
+	speed := func() float64 {
 		elapsed := time.Since(start)
-		if !earlyChecked && earlyCheck > 0 && elapsed >= earlyCheck {
-			earlyChecked = true
-			currentSpeed := float64(downloaded) * 8 / elapsed.Seconds() / 1e6
-			if currentSpeed < minMbps {
-				return currentSpeed, downloaded, fmt.Errorf("速度过慢 (%.2f Mbps < %.2f Mbps)", currentSpeed, minMbps)
-			}
+		if elapsed <= 0 {
+			return 0
 		}
+		return float64(downloaded) * 8 / elapsed.Seconds() / 1e6
+	}
 
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
+	for {
+		// 每轮先看 ctx：若恰好在两次读取之间到期，用已下载数据计速，
+		// 而不是把这份本来有效的测速结果丢掉。
+		if err := ctx.Err(); err != nil {
+			if downloaded > 0 && !errors.Is(err, context.Canceled) {
+				return speed(), downloaded, nil
+			}
 			if downloaded == 0 {
 				return 0, downloaded, err
 			}
+			return speed(), downloaded, err
+		}
+
+		n, readErr := reader.Read(buf)
+		downloaded += int64(n)
+
+		if !earlyChecked && earlyCheck > 0 && time.Since(start) >= earlyCheck {
+			earlyChecked = true
+			if s := speed(); s < minMbps {
+				return s, downloaded, fmt.Errorf("速度过慢 (%.2f Mbps < %.2f Mbps)", s, minMbps)
+			}
+		}
+
+		if readErr == io.EOF {
 			break
+		}
+		if readErr != nil {
+			if downloaded > 0 {
+				// 用户主动取消仍算失败；超时/连接重置则用已下载数据计速
+				if errors.Is(ctx.Err(), context.Canceled) {
+					return 0, downloaded, ctx.Err()
+				}
+				return speed(), downloaded, nil
+			}
+			return 0, downloaded, readErr
 		}
 	}
 
-	elapsed := time.Since(start)
-	if elapsed <= 0 || downloaded <= 0 {
+	if downloaded <= 0 {
 		return 0, downloaded, fmt.Errorf("下载数据量过少")
 	}
-	return float64(downloaded) * 8 / elapsed.Seconds() / 1e6, downloaded, nil
+	return speed(), downloaded, nil
 }
 
 // FetchTraceMap 读取 trace 响应并解析 key=value。

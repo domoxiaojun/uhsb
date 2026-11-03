@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,7 @@ type Config struct {
 	TestRounds            int
 	ConnectTimeout        int
 	MaxLatency            int
+	Port                  int
 	DownloadSizeMB        int
 	ColoRetries           int
 	SingleSpeedTimeoutSec int
@@ -95,6 +97,9 @@ func (c Config) withDefaults() Config {
 	if c.MaxLatency <= 0 {
 		c.MaxLatency = 200
 	}
+	if c.Port <= 0 {
+		c.Port = 443
+	}
 	if c.DownloadSizeMB <= 0 {
 		c.DownloadSizeMB = 200
 	}
@@ -104,10 +109,10 @@ func (c Config) withDefaults() Config {
 	if c.SingleSpeedTimeoutSec <= 0 {
 		c.SingleSpeedTimeoutSec = 30
 	}
-	if c.MaxPacketLoss == 0 {
+	if c.MaxPacketLoss < 0 {
 		c.MaxPacketLoss = 10
 	}
-	if c.MinSpeedMbps == 0 {
+	if c.MinSpeedMbps < 0 {
 		c.MinSpeedMbps = 50
 	}
 	if c.JitterBaseline == 0 {
@@ -334,15 +339,25 @@ func (s *session) applyTrace(ctx context.Context, result *TestResult) {
 	}
 }
 
+// latencyPort 返回延迟探测使用的端口：sing-box 模式下用节点真实端口，
+// 否则用通用端口（默认 443），避免把节点端口与探测端口混为一谈。
+func (s *session) latencyPort() string {
+	if s.cfg.UseSingBox && s.cfg.VMessPort > 0 {
+		return strconv.Itoa(s.cfg.VMessPort)
+	}
+	return strconv.Itoa(s.cfg.Port)
+}
+
 func (s *session) latencyRounds(ctx context.Context, ip string) ([]time.Duration, float64) {
 	var latencies []time.Duration
 	timeout := time.Duration(s.cfg.ConnectTimeout) * time.Second
+	port := s.latencyPort()
 	for i := 0; i < s.cfg.TestRounds; i++ {
 		if ctx.Err() != nil {
 			return latencies, 100
 		}
 		roundCtx, cancel := context.WithTimeout(ctx, timeout)
-		lat, err := cfcommon.MeasureTCPLatency(roundCtx, ip, "443", timeout)
+		lat, err := cfcommon.MeasureTCPLatency(roundCtx, ip, port, timeout)
 		cancel()
 		if err == nil {
 			latencies = append(latencies, lat)
@@ -379,11 +394,23 @@ func summarizeLatencies(result *TestResult, latencies []time.Duration) {
 }
 
 func (s *session) calculateScore(r TestResult) float64 {
+	latLimit := float64(s.cfg.MaxLatency)
+	if latLimit <= 0 {
+		latLimit = 1
+	}
 	latMs := float64(r.AvgLatency.Milliseconds())
-	latScore := math.Max(0, 40*(1-latMs/float64(s.cfg.MaxLatency)))
-	speedScore := math.Min(35, r.DownloadMbps/(s.cfg.MinSpeedMbps)*35)
+	latScore := math.Max(0, 40*(1-latMs/latLimit))
+	speedRef := s.cfg.MinSpeedMbps
+	if speedRef <= 0 {
+		speedRef = 50
+	}
+	speedScore := math.Min(35, r.DownloadMbps/speedRef*35)
+	jitterBase := s.cfg.JitterBaseline
+	if jitterBase <= 0 {
+		jitterBase = 100
+	}
 	jitter := float64(r.MaxLatency-r.MinLatency) / float64(time.Millisecond)
-	stabilityScore := math.Max(0, 15*(1-jitter/(s.cfg.JitterBaseline)))
+	stabilityScore := math.Max(0, 15*(1-jitter/jitterBase))
 	lossBase := math.Max(s.cfg.MaxPacketLoss, 1)
 	lossScore := math.Max(0, 10*(1-r.PacketLoss/lossBase))
 	return latScore + speedScore + stabilityScore + lossScore
@@ -425,7 +452,10 @@ func (s *session) measureSpeed(ctx context.Context, ip string, timeout time.Dura
 	defer cancel()
 	target := BuildDownloadURL(s.cfg.Protocol, s.cfg.SpeedHost, s.cfg.DownloadSizeMB)
 	if s.box != nil && s.cfg.VMessUUID != "" && s.cfg.VMessHost != "" {
-		inst, err := s.box.Start(speedCtx, s.vmessNode(ip, ""))
+		// 启动内核单独计时，不占用测速窗口，避免慢启动压缩有效测速时间
+		startCtx, startCancel := context.WithTimeout(ctx, 15*time.Second)
+		inst, err := s.box.Start(startCtx, s.vmessNode(ip, ""))
+		startCancel()
 		if err != nil {
 			return 0, err
 		}
@@ -548,7 +578,7 @@ launch:
 	saveVMessExports(cfg, premium, out, reporter)
 	out.ReportFile = cfg.OutputPrefix + "_report.txt"
 	generateReport(cfg, results, premium, out.ReportFile, reporter)
-	showSummary(results, premium, reporter)
+	showSummary(results, premium, len(ips), reporter)
 	return out, nil
 }
 
@@ -921,9 +951,9 @@ func generateReport(cfg Config, results, premium []TestResult, filename string, 
 	}
 }
 
-func showSummary(results, premium []TestResult, reporter cfcommon.Reporter) {
+func showSummary(results, premium []TestResult, tested int, reporter cfcommon.Reporter) {
 	reporter.Log("cfspeed", "═══ 测试摘要 ═══")
-	reporter.Log("cfspeed", "测试IP: %d | 有效: %d | 优质: %d", len(results), len(results), len(premium))
+	reporter.Log("cfspeed", "测试IP: %d | 有效: %d | 优质: %d", tested, len(results), len(premium))
 	showN := 10
 	if showN > len(premium) {
 		showN = len(premium)

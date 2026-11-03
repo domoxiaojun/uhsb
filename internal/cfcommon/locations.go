@@ -31,8 +31,12 @@ var (
 	locationPath = "locations.json"
 )
 
-// LoadLocations 依次尝试 ./locations.json、../locations.json,最后从 CF 下载并缓存到 ./locations.json。
-// 返回 IATA(大写) → Location 的映射。进程级缓存,多次调用只读一次。
+// LoadLocations 读取 locations.json（colo→城市对照的唯一数据源）。
+//
+// 查找顺序优先 /app/locations.json（Docker 镜像内位置），再依次尝试可执行
+// 文件所在目录、当前目录及 /data。只有在"本地都没找到、走网络下载"时才会把
+// 结果缓存到 locationPath，避免镜像更新后 /data 里的旧副本继续遮蔽 /app 的新数据。
+// 返回 IATA(大写) → Location 的映射。进程级缓存，多次调用只读一次。
 func LoadLocations() (map[string]Location, error) {
 	locCacheMux.Lock()
 	defer locCacheMux.Unlock()
@@ -41,9 +45,10 @@ func LoadLocations() (map[string]Location, error) {
 	}
 
 	var data []byte
-	var err error
+	downloaded := false
 	for _, path := range locationSearchPaths() {
-		if data, err = os.ReadFile(path); err == nil {
+		if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
+			data = b
 			break
 		}
 	}
@@ -61,13 +66,14 @@ func LoadLocations() (map[string]Location, error) {
 		if err != nil {
 			return nil, err
 		}
+		downloaded = true
 	}
 
 	var locs []Location
 	if err := json.Unmarshal(data, &locs); err != nil {
 		return nil, fmt.Errorf("解析 locations.json 失败: %w", err)
 	}
-	if _, err := os.Stat(locationPath); err != nil && os.IsNotExist(err) {
+	if downloaded && len(locs) > 0 {
 		if writeErr := os.WriteFile(locationPath, data, 0644); writeErr != nil {
 			fmt.Printf("[警告] locations.json 缓存失败: %v\n", writeErr)
 		}
@@ -83,17 +89,17 @@ func LoadLocations() (map[string]Location, error) {
 
 func locationSearchPaths() []string {
 	paths := []string{
+		"/app/locations.json",
 		"locations.json",
 		filepath.Join("..", "locations.json"),
-		"/app/locations.json",
 		"/data/locations.json",
 	}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
-		paths = append(paths,
+		paths = append([]string{
 			filepath.Join(dir, "locations.json"),
 			filepath.Join(dir, "..", "locations.json"),
-		)
+		}, paths...)
 	}
 	return paths
 }

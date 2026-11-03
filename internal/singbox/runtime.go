@@ -8,23 +8,25 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sync/atomic"
+	"strings"
+	"sync"
 	"time"
+)
+
+const (
+	startupTimeout = 8 * time.Second
+	startAttempts  = 3
 )
 
 type Config struct {
 	Binary     string
 	WorkDir    string
 	ListenHost string
-	BasePort   int
 }
 
 func (c Config) withDefaults() Config {
 	if c.ListenHost == "" {
 		c.ListenHost = "127.0.0.1"
-	}
-	if c.BasePort <= 0 {
-		c.BasePort = 18080
 	}
 	return c
 }
@@ -34,25 +36,46 @@ type Instance struct {
 	ListenAddr string
 	ProxyURL   string
 	ConfigPath string
-	cmd        *exec.Cmd
+
+	cmd     *exec.Cmd
+	cancel  context.CancelFunc
+	done    chan struct{}
+	exitErr error
+	stderr  *tailBuffer
 }
 
 func (i *Instance) Close() error {
-	if i == nil || i.cmd == nil || i.cmd.Process == nil {
+	if i == nil {
 		return nil
 	}
-	_ = i.cmd.Process.Kill()
-	_, _ = i.cmd.Process.Wait()
+	if i.cancel != nil {
+		i.cancel()
+	}
+	if i.cmd != nil && i.cmd.Process != nil {
+		select {
+		case <-i.done:
+		default:
+			_ = i.cmd.Process.Kill()
+			<-i.done
+		}
+	}
 	if i.ConfigPath != "" {
 		_ = os.Remove(i.ConfigPath)
 	}
 	return nil
 }
 
+// Stderr 返回 sing-box 最近输出的诊断信息（启动失败时用于报错）。
+func (i *Instance) Stderr() string {
+	if i == nil || i.stderr == nil {
+		return ""
+	}
+	return i.stderr.String()
+}
+
 type Manager struct {
 	cfg    Config
 	binary string
-	seq    atomic.Uint32
 }
 
 func Available(explicit string) (string, bool) {
@@ -83,11 +106,33 @@ func NewManager(cfg Config) (*Manager, error) {
 
 func (m *Manager) Binary() string { return m.binary }
 
+// Start 为单个节点拉起一个临时 sing-box 实例。
+// ctx 只约束"启动"阶段；进程生命周期由内部 handle 管理，测速超时不会误杀内核。
 func (m *Manager) Start(ctx context.Context, node Node) (*Instance, error) {
-	port := m.cfg.BasePort + int(m.seq.Add(1)%1000)
-	listen := m.cfg.ListenHost
-	cfgMap := runtimeConfig(node, listen, port)
-	raw, err := json.MarshalIndent(cfgMap, "", "  ")
+	var lastErr error
+	for attempt := 0; attempt < startAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		inst, err := m.startOnce(ctx, node)
+		if err == nil {
+			return inst, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("sing-box 启动失败")
+	}
+	return nil, lastErr
+}
+
+func (m *Manager) startOnce(ctx context.Context, node Node) (*Instance, error) {
+	port, err := freePort(m.cfg.ListenHost)
+	if err != nil {
+		return nil, fmt.Errorf("分配本地端口失败: %w", err)
+	}
+
+	raw, err := json.MarshalIndent(runtimeConfig(node, m.cfg.ListenHost, port), "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -100,42 +145,66 @@ func (m *Manager) Start(ctx context.Context, node Node) (*Instance, error) {
 		return nil, err
 	}
 
-	cmd := exec.CommandContext(ctx, m.binary, "run", "-c", path)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	runCtx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(runCtx, m.binary, "run", "-c", path)
+	stderr := &tailBuffer{max: 4096}
+	cmd.Stdout = stderr
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
+		cancel()
 		_ = os.Remove(path)
 		return nil, fmt.Errorf("启动 sing-box 失败: %w", err)
 	}
 
-	addr := net.JoinHostPort(listen, fmt.Sprintf("%d", port))
-	if err := waitTCP(ctx, addr, 8*time.Second); err != nil {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-		_ = os.Remove(path)
-		return nil, fmt.Errorf("sing-box 未在 %s 就绪: %w", addr, err)
-	}
-
-	return &Instance{
+	inst := &Instance{
 		Node:       node,
-		ListenAddr: addr,
-		ProxyURL:   "http://" + addr,
+		ListenAddr: net.JoinHostPort(m.cfg.ListenHost, fmt.Sprintf("%d", port)),
 		ConfigPath: path,
 		cmd:        cmd,
-	}, nil
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		stderr:     stderr,
+	}
+	inst.ProxyURL = "http://" + inst.ListenAddr
+
+	go func() {
+		inst.exitErr = cmd.Wait()
+		close(inst.done)
+	}()
+
+	if err := waitReady(ctx, inst.ListenAddr, inst.done, startupTimeout); err != nil {
+		diag := strings.TrimSpace(stderr.String())
+		_ = inst.Close()
+		if diag != "" {
+			return nil, fmt.Errorf("sing-box 未就绪 (%s): %w；内核输出: %s", inst.ListenAddr, err, firstLine(diag))
+		}
+		return nil, fmt.Errorf("sing-box 未就绪 (%s): %w", inst.ListenAddr, err)
+	}
+	return inst, nil
 }
 
-func waitTCP(ctx context.Context, addr string, timeout time.Duration) error {
+func waitReady(ctx context.Context, addr string, done <-chan struct{}, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last error
 	for time.Now().Before(deadline) {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		select {
+		case <-done:
+			return fmt.Errorf("sing-box 启动后立即退出")
+		default:
 		}
 		d := net.Dialer{Timeout: 400 * time.Millisecond}
 		conn, err := d.DialContext(ctx, "tcp", addr)
 		if err == nil {
 			_ = conn.Close()
+			// 端口能连上还不够：确认不是别家进程占着，也不是内核刚崩
+			select {
+			case <-done:
+				return fmt.Errorf("sing-box 启动后立即退出")
+			default:
+			}
 			return nil
 		}
 		last = err
@@ -149,4 +218,48 @@ func waitTCP(ctx context.Context, addr string, timeout time.Duration) error {
 		last = fmt.Errorf("timeout")
 	}
 	return last
+}
+
+// freePort 向系统要一个当前空闲的本地端口，避免固定端口段被占用时
+// 测速流量打到别的进程上。
+func freePort(host string) (int, error) {
+	l, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	addr, ok := l.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0, fmt.Errorf("无法确定监听端口")
+	}
+	return addr.Port, nil
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
+}
+
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+	max int
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if t.max > 0 && len(t.buf) > t.max {
+		t.buf = append([]byte(nil), t.buf[len(t.buf)-t.max:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
 }

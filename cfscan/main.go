@@ -15,6 +15,7 @@ var (
 	retries     = flag.Int("r", 1, "失败后的重试次数")
 	mtrCycles   = flag.Int("c", 2, "MTR每节点探测包数量")
 	mtrTimeout  = flag.Int("t", 10, "MTR超时(秒)")
+	highHops    = flag.Int("hops", cfscan.DefaultHighQualityHops, "跳数大于该值视为高跳数优质线路(<=0 关闭)")
 	verbose     = flag.Bool("v", false, "详细输出")
 	inputFile   = flag.String("f", "", "IP文件路径")
 	outputPfx   = flag.String("o", "", "输出文件前缀(默认用输入文件名)")
@@ -55,14 +56,15 @@ func main() {
 	defer stopSig()
 
 	_, err := cfscan.Run(ctx, cfscan.Config{
-		InputFile:  selectedFile,
-		OutputPfx:  *outputPfx,
-		Workers:    *workers,
-		Retries:    *retries,
-		MTRCycles:  *mtrCycles,
-		MTRTimeout: *mtrTimeout,
-		Verbose:    *verbose,
-		HostHeader: *hostHeader,
+		InputFile:       selectedFile,
+		OutputPfx:       *outputPfx,
+		Workers:         *workers,
+		Retries:         *retries,
+		MTRCycles:       *mtrCycles,
+		MTRTimeout:      *mtrTimeout,
+		HighQualityHops: *highHops,
+		Verbose:         *verbose,
+		HostHeader:      *hostHeader,
 	}, cfcommon.StdoutReporter())
 	if err != nil {
 		fmt.Printf("[错误] %v\n", err)

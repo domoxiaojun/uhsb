@@ -15,6 +15,9 @@ services:
       CFWEB_ADDR: 0.0.0.0:8787
       CFWEB_OPEN: "false"
       CFWEB_ROOT: /data
+      # 默认仅允许局域网访问（回环 + 私有网段 + 本机网卡网段）。
+      # 可用逗号分隔 CIDR 覆盖，例如 192.168.1.0/24；设为 any 放开（不推荐）。
+      CFWEB_ALLOW: ${CFWEB_ALLOW:-lan}
     volumes:
       - ./data:/data
       - ./locations.json:/app/locations.json:ro

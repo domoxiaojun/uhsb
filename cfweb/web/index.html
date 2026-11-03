@@ -34,7 +34,7 @@ input, select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); b
 button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor: pointer; }
 .primary { background: var(--blue); color: #fff; }
 .ghost { background: var(--blue-bg); color: var(--blue); }
-.status { font-size: 12px; color: var(--muted); margin-top: 10px; }
+.status { font-size: 12px; color: var(--muted); margin-top: 10px; word-break: break-all; }
 .log { height: 280px; overflow: auto; background: #1e1e1c; color: #e8e6dc; font: 12px/1.45 var(--mono); padding: 12px; border-radius: 8px; white-space: pre-wrap; }
 .hits { width: 100%; border-collapse: collapse; font-size: 12px; }
 .hits th, .hits td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
@@ -72,13 +72,15 @@ button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor
       <div><label>最低 Mbps</label><input id="speed" type="number" value="50"></div>
     </div>
     <label><input id="detail" type="checkbox" checked> cfdata 详细延迟测试</label>
-    <label><input id="skipscan" type="checkbox"> 跳过 cfscan（Windows 默认建议勾）</label>
+    <label><input id="skipscan" type="checkbox"> 跳过 cfscan（无 mtr 时自动勾选）</label>
     <label><input id="connect" type="checkbox"> 追加 cfconnectivity 复核</label>
     <label><input id="singbox" type="checkbox"> 经 sing-box 测 VMess+WS</label>
     <label>VMess UUID</label>
     <input id="uuid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-    <label>WS Host / SNI</label>
+    <label>WS Host</label>
     <input id="wshost" placeholder="your.domain.com">
+    <label>SNI（留空 = 用环境变量 VMESS_SNI，再退回 WS Host）</label>
+    <input id="sni" placeholder="留空则跟随 WS Host">
     <div class="row">
       <div><label>WS Path</label><input id="wspath" value="/"></div>
       <div><label>端口</label><input id="vmessport" type="number" value="443"></div>
@@ -116,40 +118,57 @@ const statusEl = document.getElementById('status');
 const busyEl = document.getElementById('busy');
 const metaEl = document.getElementById('meta');
 let defaultsApplied = false;
+let uuidConfigured = false;
 
 function line(text) {
   logEl.textContent += text + '\n';
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+function clearUI() {
+  logEl.textContent = '';
+  hitsEl.replaceChildren();
+}
+
+function addHit(stage, ip, msg) {
+  const tr = document.createElement('tr');
+  const td1 = document.createElement('td'); td1.textContent = stage || '';
+  const td2 = document.createElement('td'); td2.textContent = ip || '';
+  const td3 = document.createElement('td'); td3.textContent = msg || '';
+  tr.append(td1, td2, td3);
+  hitsEl.prepend(tr);
+}
+
 async function refreshStatus() {
   const s = await (await fetch('/api/status')).json();
-  metaEl.textContent = `v${s.version} · ${s.goos} · ${s.root}`
-    + (s.mtr ? ' · mtr 可用' : ' · 无 mtr，建议跳过 cfscan')
+  metaEl.textContent = `v${s.version} · ${s.goos} · 访问范围 ${s.allow} · ${s.root}`
+    + (s.mtr ? ' · mtr 可用' : ' · mtr 不可用，建议跳过 cfscan')
     + (s.singbox ? ' · sing-box 可用' : ' · 未检测到 sing-box');
   busyEl.textContent = s.busy ? '运行中' : '空闲';
   busyEl.className = 'pill ' + (s.busy ? 'warn' : 'ok');
   if (!s.mtr) document.getElementById('skipscan').checked = true;
   if (!defaultsApplied && s.defaults) {
     defaultsApplied = true;
-    if (s.defaults.uuid) document.getElementById('uuid').value = s.defaults.uuid;
+    uuidConfigured = !!s.defaults.uuidSet;
+    if (uuidConfigured) document.getElementById('uuid').placeholder = '服务端已配置，留空即可';
     if (s.defaults.host) document.getElementById('wshost').value = s.defaults.host;
     if (s.defaults.path) document.getElementById('wspath').value = s.defaults.path;
     if (s.defaults.port) document.getElementById('vmessport').value = s.defaults.port;
+    document.getElementById('sni').placeholder = s.defaults.sni ? ('留空 = ' + s.defaults.sni) : '留空则跟随 WS Host';
     document.getElementById('vmesstls').checked = !!s.defaults.tls;
-    if (s.singbox && s.defaults.uuid && s.defaults.host) {
+    if (s.singbox && s.defaults.host && (uuidConfigured || document.getElementById('uuid').value)) {
       document.getElementById('singbox').checked = true;
     }
   }
   if (s.error) statusEl.textContent = s.error;
-  if (s.runDir) statusEl.textContent = '最近运行: ' + s.runDir;
+  else if (s.runDir) statusEl.textContent = '最近运行: ' + s.runDir;
   return s;
 }
 
 async function refreshRuns() {
   const names = await (await fetch('/api/runs')).json();
   const box = document.getElementById('runs');
-  box.innerHTML = '';
+  box.replaceChildren();
   (names || []).slice(0, 12).forEach(name => {
     const a = document.createElement('a');
     a.href = '#';
@@ -158,7 +177,7 @@ async function refreshRuns() {
       e.preventDefault();
       const files = await (await fetch('/api/files?run=' + encodeURIComponent(name))).json();
       const fbox = document.getElementById('files');
-      fbox.innerHTML = '';
+      fbox.replaceChildren();
       (files || []).forEach(file => {
         const fa = document.createElement('a');
         fa.href = '/api/files?run=' + encodeURIComponent(name) + '&file=' + encodeURIComponent(file);
@@ -177,10 +196,8 @@ document.getElementById('start').onclick = async () => {
   if (document.getElementById('singbox').checked) {
     const uuid = document.getElementById('uuid').value.trim();
     const host = document.getElementById('wshost').value.trim();
-    if (!uuid || !host) {
-      statusEl.textContent = '启用 sing-box 时必须填写 UUID 和 WS Host';
-      return;
-    }
+    if (!host) { statusEl.textContent = '启用 sing-box 时必须填写 WS Host'; return; }
+    if (!uuid && !uuidConfigured) { statusEl.textContent = '启用 sing-box 时必须填写 UUID'; return; }
   }
   const body = {
     DataMode: mode,
@@ -194,15 +211,14 @@ document.getElementById('start').onclick = async () => {
     SpeedSize: Number(document.getElementById('size').value),
     SpeedMinMbps: Number(document.getElementById('speed').value),
     UseSingBox: document.getElementById('singbox').checked,
-    VMessUUID: document.getElementById('uuid').value,
-    VMessHost: document.getElementById('wshost').value,
+    VMessUUID: document.getElementById('uuid').value.trim(),
+    VMessHost: document.getElementById('wshost').value.trim(),
+    VMessSNI: document.getElementById('sni').value.trim(),
     VMessPath: document.getElementById('wspath').value,
-    VMessSNI: document.getElementById('wshost').value,
     VMessPort: Number(document.getElementById('vmessport').value),
     VMessTLS: document.getElementById('vmesstls').checked,
   };
-  hitsEl.innerHTML = '';
-  logEl.textContent = '';
+  clearUI();
   const res = await fetch('/api/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
   if (!res.ok) { statusEl.textContent = await res.text(); return; }
   statusEl.textContent = '已启动';
@@ -214,13 +230,14 @@ document.getElementById('stop').onclick = async () => {
 };
 
 const es = new EventSource('/api/events');
+// 每次连接（含断线自动重连）都先清空，再等服务器回放快照，避免重复
+es.onopen = () => clearUI();
 es.onmessage = (ev) => {
   const e = JSON.parse(ev.data);
+  if (e.kind === 'reset') { clearUI(); return; }
   if (e.message) line((e.stage ? '[' + e.stage + '] ' : '') + e.message);
   if ((e.kind === 'hit' || e.kind === 'result') && e.ip) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${e.stage || ''}</td><td>${e.ip}</td><td>${e.message || ''}</td>`;
-    hitsEl.prepend(tr);
+    addHit(e.stage, e.ip, e.message);
   }
   if (e.kind === 'done') { refreshStatus(); refreshRuns(); }
 };

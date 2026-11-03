@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestFetchTraceMapRejectsNon200(t *testing.T) {
@@ -90,5 +91,56 @@ func TestLoadLocationsRejectsNon200(t *testing.T) {
 
 	if _, err := LoadLocations(); err == nil {
 		t.Fatal("LoadLocations() error = nil, want non-nil")
+	}
+}
+
+func TestMeasureDownloadSpeedPartialOnDeadline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chunk := make([]byte, 32*1024)
+		for i := 0; i < 16; i++ {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done() // 客户端超时前一直挂着
+	}))
+	defer srv.Close()
+
+	host, _, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	speed, n, err := MeasureDownloadSpeed(ctx, host, srv.URL, 400*time.Millisecond, 0, 0, 0, 32*1024)
+	if err != nil {
+		t.Fatalf("deadline should yield partial success, got err=%v", err)
+	}
+	if speed <= 0 || n == 0 {
+		t.Fatalf("speed=%v bytes=%d, want positive", speed, n)
+	}
+}
+
+func TestMeasureDownloadSpeedCanceledReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	host, _, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		cancel()
+	}()
+	_, _, err = MeasureDownloadSpeed(ctx, host, srv.URL, 2*time.Second, 0, 0, 0, 32*1024)
+	if err == nil {
+		t.Fatal("user cancel should return error")
 	}
 }

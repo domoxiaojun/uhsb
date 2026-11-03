@@ -7,7 +7,6 @@ FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
 ARG TARGETOS
 ARG TARGETARCH
-COPY go.mod ./
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/cfweb ./cfweb \

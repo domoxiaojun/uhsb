@@ -19,3 +19,17 @@ func TestSkipScanKeepsDataIPs(t *testing.T) {
 		t.Fatal("SkipScan should stay true")
 	}
 }
+
+func TestDefaultsHighQualityHopsAndPort(t *testing.T) {
+	cfg := Config{}.withDefaults()
+	if cfg.HighQualityHops != 16 {
+		t.Fatalf("HighQualityHops = %d, want 16", cfg.HighQualityHops)
+	}
+	if cfg.Port != 443 {
+		t.Fatalf("Port = %d, want 443", cfg.Port)
+	}
+	neg := Config{HighQualityHops: -1}.withDefaults()
+	if neg.HighQualityHops != -1 {
+		t.Fatalf("HighQualityHops = %d, want -1 to disable", neg.HighQualityHops)
+	}
+}

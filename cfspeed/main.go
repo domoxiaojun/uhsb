@@ -12,25 +12,25 @@ import (
 )
 
 var (
-	modeFlag        = flag.String("mode", "batch", "运行模式: batch|optimize|single|history")
-	protocolFlag    = flag.String("protocol", "http", "测速协议: http|https")
-	singleIPFlag    = flag.String("ip", "", "单IP模式的目标IP")
-	speedHostFlag   = flag.String("speed-host", cfspeed.DefaultSpeedHost, "测速域名")
-	historyFileFlag = flag.String("history-file", "speed_test_results.csv", "历史结果CSV路径")
-	inputFile       = flag.String("f", "speed.txt", "输入IP文件路径")
-	workers         = flag.Int("w", 20, "并发测试数量")
-	testRounds      = flag.Int("rounds", 3, "每个IP的延迟测试轮数")
-	connectTimeout  = flag.Int("timeout", 3, "连接超时(秒)")
-	maxPacketLoss   = flag.Float64("loss", 10.0, "最大允许丢包率(%)")
-	minSpeedMbps    = flag.Float64("speed", 50.0, "最低速度要求(Mbps)")
-	maxLatency      = flag.Int("latency", 200, "最大延迟(ms)")
-	downloadSizeMB  = flag.Int("size", 200, "测速文件大小(MB), 如: 10, 50, 200")
-	outputPrefix    = flag.String("o", "cfspeed", "输出文件前缀")
-	coloFilter      = flag.String("colo", "", "只测指定Colo(逗号分隔,如:HKG,SIN)")
-	verbose         = flag.Bool("v", false, "详细输出")
-	nonInteractive  = flag.Bool("batch", false, "非交互模式")
-	hostHeader      = flag.String("host", cfspeed.DefaultHost, "HTTP请求Host头(CF已禁止裸IP直连)")
-	jitterBaseline  = flag.Float64("jitter-baseline", 100.0, "稳定性评分归零的抖动ms阈值")
+	modeFlag           = flag.String("mode", "batch", "运行模式: batch|optimize|single|history")
+	protocolFlag       = flag.String("protocol", "http", "测速协议: http|https")
+	singleIPFlag       = flag.String("ip", "", "单IP模式的目标IP")
+	speedHostFlag      = flag.String("speed-host", cfspeed.DefaultSpeedHost, "测速域名")
+	historyFileFlag    = flag.String("history-file", "speed_test_results.csv", "历史结果CSV路径")
+	inputFile          = flag.String("f", "speed.txt", "输入IP文件路径")
+	workers            = flag.Int("w", 20, "并发测试数量")
+	testRounds         = flag.Int("rounds", 3, "每个IP的延迟测试轮数")
+	connectTimeout     = flag.Int("timeout", 3, "连接超时(秒)")
+	maxPacketLoss      = flag.Float64("loss", 10.0, "最大允许丢包率(%)")
+	minSpeedMbps       = flag.Float64("speed", 50.0, "最低速度要求(Mbps)")
+	maxLatency         = flag.Int("latency", 200, "最大延迟(ms)")
+	downloadSizeMB     = flag.Int("size", 200, "测速文件大小(MB), 如: 10, 50, 200")
+	outputPrefix       = flag.String("o", "cfspeed", "输出文件前缀")
+	coloFilter         = flag.String("colo", "", "只测指定Colo(逗号分隔,如:HKG,SIN)")
+	verbose            = flag.Bool("v", false, "详细输出")
+	nonInteractive     = flag.Bool("batch", false, "非交互模式")
+	hostHeader         = flag.String("host", cfspeed.DefaultHost, "HTTP请求Host头(CF已禁止裸IP直连)")
+	jitterBaseline     = flag.Float64("jitter-baseline", 100.0, "稳定性评分归零的抖动ms阈值")
 	coloRetries        = flag.Int("colo-retries", 1, "trace 获取 colo 失败的重试次数 (0 = 不重试)")
 	showVersion        = flag.Bool("version", false, "显示版本号")
 	useSingBox         = flag.Bool("singbox", false, "经 sing-box 用 VMess+WS 测速")
@@ -90,23 +90,23 @@ func runOnce() {
 
 func currentConfig() cfspeed.Config {
 	return cfspeed.Config{
-		Mode:           *modeFlag,
-		Protocol:       *protocolFlag,
-		InputFile:      *inputFile,
-		SingleIP:       *singleIPFlag,
-		SpeedHost:      *speedHostFlag,
-		HistoryFile:    *historyFileFlag,
-		OutputPrefix:   *outputPrefix,
-		HostHeader:     *hostHeader,
-		ColoFilter:     *coloFilter,
-		Workers:        *workers,
-		TestRounds:     *testRounds,
-		ConnectTimeout: *connectTimeout,
-		MaxLatency:     *maxLatency,
-		DownloadSizeMB: *downloadSizeMB,
-		ColoRetries:    *coloRetries,
-		MaxPacketLoss:  *maxPacketLoss,
-		MinSpeedMbps:   *minSpeedMbps,
+		Mode:               *modeFlag,
+		Protocol:           *protocolFlag,
+		InputFile:          *inputFile,
+		SingleIP:           *singleIPFlag,
+		SpeedHost:          *speedHostFlag,
+		HistoryFile:        *historyFileFlag,
+		OutputPrefix:       *outputPrefix,
+		HostHeader:         *hostHeader,
+		ColoFilter:         *coloFilter,
+		Workers:            *workers,
+		TestRounds:         *testRounds,
+		ConnectTimeout:     *connectTimeout,
+		MaxLatency:         *maxLatency,
+		DownloadSizeMB:     *downloadSizeMB,
+		ColoRetries:        *coloRetries,
+		MaxPacketLoss:      *maxPacketLoss,
+		MinSpeedMbps:       *minSpeedMbps,
 		JitterBaseline:     *jitterBaseline,
 		Verbose:            *verbose,
 		UseSingBox:         *useSingBox,

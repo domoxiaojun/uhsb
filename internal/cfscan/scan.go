@@ -1,6 +1,7 @@
 package cfscan
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -22,20 +23,30 @@ const (
 	CMIJP       = "223.118.4.105"
 	CMIUS       = "221.183.137.177"
 	DefaultHost = "www.visa.cn"
+
+	// DefaultHighQualityHops 是"高跳数视为优质线路"的阈值（沿用原版启发式）。
+	DefaultHighQualityHops = 16
 )
 
 var keywordRegex = regexp.MustCompile(`\b(hkg|tpe|tw|hk)\b`)
 
+var (
+	mtrProbeMu  sync.Mutex
+	mtrProbeAt  time.Time
+	mtrProbeErr error
+)
+
 type Config struct {
-	InputFile  string
-	OutputPfx  string
-	Workers    int
-	Retries    int
-	MTRCycles  int
-	MTRTimeout int
-	Verbose    bool
-	HostHeader string
-	WorkDir    string
+	InputFile       string
+	OutputPfx       string
+	Workers         int
+	Retries         int
+	MTRCycles       int
+	MTRTimeout      int
+	HighQualityHops int
+	Verbose         bool
+	HostHeader      string
+	WorkDir         string
 }
 
 func (c Config) withDefaults() Config {
@@ -50,6 +61,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MTRTimeout <= 0 {
 		c.MTRTimeout = 10
+	}
+	if c.HighQualityHops == 0 {
+		c.HighQualityHops = DefaultHighQualityHops
 	}
 	if c.HostHeader == "" {
 		c.HostHeader = DefaultHost
@@ -84,9 +98,62 @@ func findMTR() (string, error) {
 	return "", fmt.Errorf("mtr 未安装。请: sudo apt install mtr / brew install mtr")
 }
 
+// MTRStatus 返回 mtr 路径与"能否真正运行"的探测结果。
+// 只找到二进制不代表可用：macOS 上 brew 版 mtr 通常需要 root，
+// Docker 里没有 NET_RAW 也会失败。探测结果缓存 1 分钟，
+// 避免 /api/status 每几秒就 fork 一次 mtr。
+func MTRStatus() (string, error) {
+	path, err := findMTR()
+	if err != nil {
+		return "", err
+	}
+	mtrProbeMu.Lock()
+	defer mtrProbeMu.Unlock()
+	if !mtrProbeAt.IsZero() && time.Since(mtrProbeAt) < time.Minute {
+		return path, mtrProbeErr
+	}
+	mtrProbeAt = time.Now()
+	mtrProbeErr = probeMTR(path)
+	return path, mtrProbeErr
+}
+
 func MTRAvailable() bool {
-	_, err := findMTR()
+	_, err := MTRStatus()
 	return err == nil
+}
+
+func probeMTR(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "-r", "-c", "1", "-n", "--timeout", "2", "127.0.0.1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		msg := firstLineOf(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("mtr 无法运行: %s", msg)
+	}
+	if !strings.Contains(string(out), "HOST") && !strings.Contains(string(out), "127.0.0.1") {
+		return fmt.Errorf("mtr 输出异常，未产生路由结果")
+	}
+	return nil
+}
+
+func resetMTRProbe() {
+	mtrProbeMu.Lock()
+	mtrProbeAt = time.Time{}
+	mtrProbeErr = nil
+	mtrProbeMu.Unlock()
+}
+
+func firstLineOf(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }
 
 func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, error) {
@@ -240,18 +307,21 @@ feed:
 	return out, nil
 }
 
-func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Location, mtrBin, ip string) (CategorizedResult, bool) {
-	result := CategorizedResult{IP: ip}
-
-	var directCMI string
+func directCMIKeyword(ip string) string {
 	switch ip {
 	case CMIHK:
-		directCMI = "cmi-hk"
+		return "cmi-hk"
 	case CMIJP:
-		directCMI = "cmi-jp"
+		return "cmi-jp"
 	case CMIUS:
-		directCMI = "cmi-us"
+		return "cmi-us"
 	}
+	return ""
+}
+
+func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Location, mtrBin, ip string) (CategorizedResult, bool) {
+	result := CategorizedResult{IP: ip}
+	directCMI := directCMIKeyword(ip)
 
 	cmd := exec.CommandContext(ctx, mtrBin, "-r",
 		"-c", strconv.Itoa(cfg.MTRCycles),
@@ -268,12 +338,34 @@ func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Locat
 		return result, false
 	}
 
-	lines := strings.Split(string(output), "\n")
+	result, ok := classifyMTR(string(output), ip, cfg.HighQualityHops)
+	if !ok {
+		if directCMI == "" {
+			return result, false
+		}
+		// 已知 CMI 直连 IP 即使路由输出没命中关键字也按直连线路计入
+		result.Keyword = directCMI
+		result.MatchingHop = "CMI Direct"
+		enrichColo(ctx, cfg, locMap, &result)
+		return result, true
+	}
+	if directCMI != "" && !strings.Contains(result.Keyword, directCMI) {
+		result.Keyword += "+" + directCMI
+	}
+	enrichColo(ctx, cfg, locMap, &result)
+	return result, true
+}
+
+// classifyMTR 解析 mtr 输出，判断是否命中优质路由。
+// highQualityHops <= 0 时关闭"高跳数"启发式。
+func classifyMTR(output, ip string, highQualityHops int) (CategorizedResult, bool) {
+	result := CategorizedResult{IP: ip}
+
 	type match struct{ keyword, hop, loss, avg string }
 	var matches []match
 	var hopCount int
 
-	for _, line := range lines {
+	for _, line := range strings.Split(output, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.Contains(line, "HOST") || strings.Contains(line, "Start:") {
 			continue
@@ -299,12 +391,9 @@ func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Locat
 	}
 
 	result.HopCount = hopCount
-	isHighQuality := hopCount > 16
+	isHighQuality := highQualityHops > 0 && hopCount > highQualityHops
 
-	var keywords []string
-	if directCMI != "" {
-		keywords = append(keywords, directCMI)
-	}
+	keywords := make([]string, 0, len(matches)+2)
 	if isHighQuality {
 		keywords = append(keywords, "high-quality")
 	}
@@ -320,13 +409,9 @@ func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Locat
 		result.MatchingHop = matches[0].hop
 		result.LossPct = matches[0].loss
 		result.AvgMs = matches[0].avg
-	} else if isHighQuality {
-		result.MatchingHop = fmt.Sprintf("High Quality (%d跳)", hopCount)
 	} else {
-		result.MatchingHop = "CMI Direct"
+		result.MatchingHop = fmt.Sprintf("High Quality (%d跳)", hopCount)
 	}
-
-	enrichColo(ctx, cfg, locMap, &result)
 	return result, true
 }
 

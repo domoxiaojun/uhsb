@@ -17,18 +17,19 @@ import (
 )
 
 func loadResources(cfg Config, reporter cfcommon.Reporter) ([]string, map[string]cfcommon.Location, error) {
-	var ipURL, localFile string
+	var ipURL, name string
 	if cfg.IPType == "6" {
-		ipURL, localFile = cfg.IPv6URL, pathIn(cfg, "ips-v6.txt")
+		ipURL, name = cfg.IPv6URL, "ips-v6.txt"
 	} else {
-		ipURL, localFile = cfg.IPv4URL, pathIn(cfg, "ips-v4.txt")
+		ipURL, name = cfg.IPv4URL, "ips-v4.txt"
 	}
 
-	subnets, err := loadOrDownload(localFile, ipURL)
+	cachePath := cfcommon.WorkPath(cfg.CacheDir, name)
+	subnets, source, err := loadSubnetList(cachePath, ipURL, cfg.MaxAge)
 	if err != nil {
 		return nil, nil, fmt.Errorf("加载IP段失败: %v", err)
 	}
-	reporter.Log("cfdata", "[信息] 已加载 %d 个子网", len(subnets))
+	reporter.Log("cfdata", "[信息] 已加载 %d 个子网 (来源: %s)", len(subnets), source)
 
 	locMap, err := cfcommon.LoadLocations()
 	if err != nil {
@@ -38,21 +39,63 @@ func loadResources(cfg Config, reporter cfcommon.Reporter) ([]string, map[string
 	return subnets, locMap, nil
 }
 
-func loadOrDownload(localFile, url string) ([]string, error) {
-	name := filepath.Base(localFile)
+// loadSubnetList 读取网段列表，优先用未过期的本地缓存；缓存过期或缺失时
+// 重新下载并刷新缓存；下载失败则退回旧缓存或镜像预置文件。
+func loadSubnetList(cachePath, url string, maxAge time.Duration) ([]string, string, error) {
+	cached, cacheErr := os.ReadFile(cachePath)
+	if cacheErr == nil {
+		if lines := parseLines(string(cached)); len(lines) > 0 && validateSubnetLines(lines) == nil {
+			if maxAge <= 0 {
+				return lines, cachePath + " (缓存)", nil
+			}
+			if st, err := os.Stat(cachePath); err == nil && time.Since(st.ModTime()) < maxAge {
+				return lines, cachePath + " (缓存)", nil
+			}
+		} else {
+			cached = nil
+		}
+	}
+
+	if lines, err := loadOrDownload(cachePath, url); err == nil {
+		return lines, url, nil
+	} else if len(cached) > 0 {
+		if lines := parseLines(string(cached)); len(lines) > 0 {
+			return lines, cachePath + " (过期缓存)", nil
+		}
+		return nil, "", err
+	}
+
+	if seed := findSeed(filepath.Base(cachePath)); seed != "" {
+		if data, err := os.ReadFile(seed); err == nil {
+			if lines := parseLines(string(data)); len(lines) > 0 && validateSubnetLines(lines) == nil {
+				return lines, seed + " (预置)", nil
+			}
+		}
+	}
+	return nil, "", fmt.Errorf("下载失败且本地无可用缓存: %s", url)
+}
+
+// findSeed 查找镜像/仓库自带的网段文件。
+func findSeed(name string) string {
 	candidates := []string{
-		localFile,
+		filepath.Join("/app", name),
 		name,
 		filepath.Join("..", name),
 		filepath.Join("cfdata", name),
-		filepath.Join("/app", name),
-		filepath.Join("/data", name),
+	}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append([]string{filepath.Join(filepath.Dir(exe), name)}, candidates...)
 	}
 	for _, candidate := range candidates {
-		if data, err := os.ReadFile(candidate); err == nil {
-			return parseLines(string(data)), nil
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+			return candidate
 		}
 	}
+	return ""
+}
+
+// loadOrDownload 下载 IP 段列表，校验通过后写入 localFile 作为缓存。
+func loadOrDownload(localFile, url string) ([]string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -73,7 +116,8 @@ func loadOrDownload(localFile, url string) ([]string, error) {
 	if err := validateSubnetLines(lines); err != nil {
 		return nil, fmt.Errorf("下载结果包含无效网段: %w", err)
 	}
-	if err := os.WriteFile(localFile, body, 0644); err != nil {
+	if err := cfcommon.WriteLinesAtomic(localFile, lines); err != nil {
+		// 能下载到就够了，缓存写不进去不致命
 		return lines, nil
 	}
 	return lines, nil

@@ -26,6 +26,7 @@ type Config struct {
 	Port               int
 	Delay              int
 	NumPerColo         int
+	HighQualityHops    int
 	Detail             bool
 	SkipScan           bool
 	RunConnect         bool
@@ -105,6 +106,10 @@ func (c Config) withDefaults() Config {
 	if c.SpeedLatency <= 0 {
 		c.SpeedLatency = 200
 	}
+	if c.HighQualityHops == 0 {
+		// 0 = 用默认阈值；负数 = 关闭"高跳数视为优质"的启发式
+		c.HighQualityHops = 16
+	}
 	if c.ConnWorkers <= 0 {
 		c.ConnWorkers = 20
 	}
@@ -177,6 +182,7 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 		Detail:      cfg.Detail,
 		HostHeader:  cfg.HostHeader,
 		WorkDir:     runDir,
+		CacheDir:    cfg.RootDir,
 	}, reporter)
 	if err != nil {
 		return out, err
@@ -195,8 +201,8 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 	speedInput := ipsFile
 	if skipScan {
 		out.SkippedScan = true
-		if !cfscan.MTRAvailable() {
-			reporter.Warn("pipeline", "本机没有 mtr，已跳过 cfscan，直接测速")
+		if _, mtrErr := cfscan.MTRStatus(); mtrErr != nil {
+			reporter.Warn("pipeline", "mtr 不可用（%v），已跳过 cfscan，直接测速", mtrErr)
 		} else {
 			reporter.Log("pipeline", "已按设置跳过 cfscan")
 		}
@@ -204,10 +210,11 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 		prefix := filepath.Join(runDir, tag)
 		scanWorkers := 16
 		scanRes, err := cfscan.Run(ctx, cfscan.Config{
-			InputFile:  ipsFile,
-			OutputPfx:  prefix,
-			HostHeader: cfg.HostHeader,
-			Workers:    scanWorkers,
+			InputFile:       ipsFile,
+			OutputPfx:       prefix,
+			HostHeader:      cfg.HostHeader,
+			Workers:         scanWorkers,
+			HighQualityHops: cfg.HighQualityHops,
 		}, reporter)
 		if err != nil {
 			return out, err
@@ -236,6 +243,7 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 		TestRounds:         cfg.SpeedRounds,
 		ConnectTimeout:     cfg.SpeedTimeout,
 		MaxLatency:         cfg.SpeedLatency,
+		Port:               cfg.Port,
 		DownloadSizeMB:     cfg.SpeedSize,
 		MaxPacketLoss:      cfg.SpeedLoss,
 		MinSpeedMbps:       cfg.SpeedMinMbps,

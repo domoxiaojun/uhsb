@@ -18,6 +18,7 @@ const (
 	KindWarn         EventKind = "warn"
 	KindError        EventKind = "error"
 	KindDone         EventKind = "done"
+	KindReset        EventKind = "reset"
 )
 
 type Event struct {
@@ -118,6 +119,13 @@ func NewHub() *Hub {
 func (h *Hub) Reset() {
 	h.mu.Lock()
 	h.log = nil
+	// 通知所有已连接的页面清空旧内容（例如另一个标签页抢先开始了新任务）
+	for ch := range h.subs {
+		select {
+		case ch <- Event{Kind: KindReset, Stage: "pipeline", Message: "新任务开始"}:
+		default:
+		}
+	}
 	h.mu.Unlock()
 }
 
@@ -129,17 +137,19 @@ func (h *Hub) Publish(e Event) {
 			h.log = h.log[len(h.log)-3000:]
 		}
 	}
-	targets := make([]chan Event, 0, len(h.subs))
 	for ch := range h.subs {
-		targets = append(targets, ch)
-	}
-	h.mu.Unlock()
-	for _, ch := range targets {
 		select {
 		case ch <- e:
 		default:
+			// 进度事件塞满直接丢弃；关键事件丢不起，断开该订阅者，
+			// 让浏览器 EventSource 自动重连并拿到完整快照，避免静默丢结果。
+			if e.Kind != KindProgress {
+				delete(h.subs, ch)
+				close(ch)
+			}
 		}
 	}
+	h.mu.Unlock()
 }
 
 func (h *Hub) Subscribe() (<-chan Event, []Event, func()) {
