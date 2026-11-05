@@ -157,6 +157,11 @@ func TestBuildPipelineConfigZeroVsUnset(t *testing.T) {
 	if zero.SpeedMinMbps != 0 || zero.SpeedLoss != 0 || zero.HighQualityHops != -1 {
 		t.Fatalf("explicit zero/disable lost: %+v", zero)
 	}
+	lat0 := 0
+	zeroLatency := buildPipelineConfig(runRequest{DataMode: "1", SpeedLatency: &lat0, SpeedMode: "single", SingleIP: "1.1.1.1", SpeedProtocol: "https"})
+	if zeroLatency.SpeedLatency != 0 || zeroLatency.SpeedMode != "single" || zeroLatency.SingleIP != "1.1.1.1" || zeroLatency.SpeedProtocol != "https" {
+		t.Fatalf("speed controls not passed through: %+v", zeroLatency)
+	}
 	unset := buildPipelineConfig(runRequest{DataMode: "1"})
 	if unset.SpeedMinMbps != 50 || unset.SpeedLoss != 10 ||
 		unset.HighQualityHops != 16 || unset.ConnSpeed != 100 || unset.ConnLoss != 10 {
@@ -300,12 +305,13 @@ func TestStatusDefaultsComeFromCommon(t *testing.T) {
 	}
 	d := payload.Defaults
 	wantInt := map[string]int{
-		"num":   cfcommon.DefaultWebNumPerColo,
-		"size":  cfcommon.DefaultSpeedSize,
-		"speed": cfcommon.DefaultMinSpeedMbps,
-		"loss":  cfcommon.DefaultMaxPacketLoss,
-		"hops":  cfcommon.DefaultHighQualityHops,
-		"port":  cfcommon.DefaultVMessPort,
+		"num":     cfcommon.DefaultWebNumPerColo,
+		"size":    cfcommon.DefaultSpeedSize,
+		"speed":   cfcommon.DefaultMinSpeedMbps,
+		"loss":    cfcommon.DefaultMaxPacketLoss,
+		"latency": cfcommon.DefaultMaxLatency,
+		"hops":    cfcommon.DefaultHighQualityHops,
+		"port":    cfcommon.DefaultVMessPort,
 	}
 	for k, want := range wantInt {
 		if got, _ := d[k].(float64); int(got) != want {
@@ -313,7 +319,8 @@ func TestStatusDefaultsComeFromCommon(t *testing.T) {
 		}
 	}
 	if d["keywords"] != cfcommon.DefaultKeywords || d["path"] != cfcommon.DefaultVMessPath ||
-		d["target"] != cfcommon.DefaultTargetColo || d["dataMode"] != cfcommon.DefaultDataMode {
+		d["target"] != cfcommon.DefaultTargetColo || d["dataMode"] != cfcommon.DefaultDataMode ||
+		d["speedMode"] != cfcommon.DefaultSpeedMode || d["protocol"] != cfcommon.DefaultSpeedProtocol {
 		t.Fatalf("string defaults drifted: %+v", d)
 	}
 }

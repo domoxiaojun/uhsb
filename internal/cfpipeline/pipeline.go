@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,7 @@ type Config struct {
 	RunConnect         bool
 	SpeedMode          string
 	SpeedProtocol      string
+	SingleIP           string
 	SpeedSize          int
 	SpeedWorkers       int
 	SpeedRounds        int
@@ -105,7 +107,8 @@ func (c Config) withDefaults() Config {
 	if c.SpeedMinMbps < 0 {
 		c.SpeedMinMbps = cfcommon.DefaultMinSpeedMbps
 	}
-	if c.SpeedLatency <= 0 {
+	// 0 = 关闭延迟门槛，只有未设置（负数）才回落到默认值。
+	if c.SpeedLatency < 0 {
 		c.SpeedLatency = cfcommon.DefaultMaxLatency
 	}
 	if c.HighQualityHops == 0 {
@@ -193,73 +196,85 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 	out := &Result{RunDir: runDir, Tag: tag}
 	reporter.Stage("pipeline", "[信息] 本次运行目录: %s", runDir)
 
-	dataRes, err := cfdata.Run(ctx, cfdata.Config{
-		Mode:        cfg.DataMode,
-		Colo:        cfg.Colo,
-		Country:     cfg.Country,
-		IPType:      cfg.IPType,
-		Port:        cfg.Port,
-		Delay:       cfg.Delay,
-		ScanThreads: cfg.ScanThreads,
-		TestThreads: cfg.TestThreads,
-		NumPerColo:  cfg.NumPerColo,
-		Detail:      cfg.Detail,
-		HostHeader:  cfg.HostHeader,
-		WorkDir:     runDir,
-		CacheDir:    cfg.RootDir,
-	}, reporter)
-	if err != nil {
-		return out, err
-	}
-	out.Data = dataRes
-	ipsFile := firstNonEmpty(dataRes.ZeroLossIPFile, dataRes.IPFile)
-	if ipsFile == "" {
-		// 用户点「停止」时 cfdata 可能只返回空结果而不带 error，
-		// 此时优先报「已取消」，不要误报成「没有产出 IP 文件」。
-		if ctx.Err() != nil {
-			return out, fmt.Errorf("任务已取消: %w", ctx.Err())
+	var speedInput string
+	singleSpeed := strings.EqualFold(strings.TrimSpace(cfg.SpeedMode), "single")
+	if singleSpeed {
+		cfg.SingleIP = strings.TrimSpace(cfg.SingleIP)
+		if net.ParseIP(cfg.SingleIP) == nil {
+			return out, fmt.Errorf("单 IP 测速需要合法的 IP")
 		}
-		return out, fmt.Errorf("cfdata 没有产出 IP 文件")
-	}
-	out.IPsFile = ipsFile
-	if ctx.Err() != nil {
-		return out, ctx.Err()
-	}
-
-	// 只探测一次，并把结果同时用于「能否扫」和日志说明，避免重复 fork mtr。
-	_, mtrErr := cfscan.MTRStatusCtx(ctx)
-	skipScan := cfg.SkipScan || mtrErr != nil
-	speedInput := ipsFile
-	if skipScan {
 		out.SkippedScan = true
-		if mtrErr != nil {
-			reporter.Warn("pipeline", "mtr 不可用（%v），已跳过 cfscan，直接测速", mtrErr)
-		} else {
-			reporter.Log("pipeline", "已按设置跳过 cfscan")
-		}
-	} else {
-		prefix := filepath.Join(runDir, tag)
-		scanRes, err := cfscan.Run(ctx, cfscan.Config{
-			InputFile:       ipsFile,
-			OutputPfx:       prefix,
-			HostHeader:      cfg.HostHeader,
-			Workers:         cfcommon.PipelineScanWorkers,
-			HighQualityHops: cfg.HighQualityHops,
-			Keywords:        cfg.ScanKeywords,
+		reporter.Log("pipeline", "单 IP 测速 %s，已跳过 colo 扫描和路由扫描", cfg.SingleIP)
+	}
+	if !singleSpeed {
+		dataRes, err := cfdata.Run(ctx, cfdata.Config{
+			Mode:        cfg.DataMode,
+			Colo:        cfg.Colo,
+			Country:     cfg.Country,
+			IPType:      cfg.IPType,
+			Port:        cfg.Port,
+			Delay:       cfg.Delay,
+			ScanThreads: cfg.ScanThreads,
+			TestThreads: cfg.TestThreads,
+			NumPerColo:  cfg.NumPerColo,
+			Detail:      cfg.Detail,
+			HostHeader:  cfg.HostHeader,
+			WorkDir:     runDir,
+			CacheDir:    cfg.RootDir,
 		}, reporter)
 		if err != nil {
 			return out, err
 		}
-		out.Scan = scanRes
-		qualityFile, err := qualityFromScan(scanRes)
-		if err != nil {
-			return out, err
+		out.Data = dataRes
+		ipsFile := firstNonEmpty(dataRes.ZeroLossIPFile, dataRes.IPFile)
+		if ipsFile == "" {
+			// 用户点「停止」时 cfdata 可能只返回空结果而不带 error，
+			// 此时优先报「已取消」，不要误报成「没有产出 IP 文件」。
+			if ctx.Err() != nil {
+				return out, fmt.Errorf("任务已取消: %w", ctx.Err())
+			}
+			return out, fmt.Errorf("cfdata 没有产出 IP 文件")
 		}
-		speedInput = qualityFile
-		out.QualityFile = qualityFile
-	}
-	if ctx.Err() != nil {
-		return out, ctx.Err()
+		out.IPsFile = ipsFile
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
+
+		// 只探测一次，并把结果同时用于「能否扫」和日志说明，避免重复 fork mtr。
+		_, mtrErr := cfscan.MTRStatusCtx(ctx)
+		skipScan := cfg.SkipScan || mtrErr != nil
+		speedInput = ipsFile
+		if skipScan {
+			out.SkippedScan = true
+			if mtrErr != nil {
+				reporter.Warn("pipeline", "mtr 不可用（%v），已跳过 cfscan，直接测速", mtrErr)
+			} else {
+				reporter.Log("pipeline", "已按设置跳过 cfscan")
+			}
+		} else {
+			prefix := filepath.Join(runDir, tag)
+			scanRes, err := cfscan.Run(ctx, cfscan.Config{
+				InputFile:       ipsFile,
+				OutputPfx:       prefix,
+				HostHeader:      cfg.HostHeader,
+				Workers:         cfcommon.PipelineScanWorkers,
+				HighQualityHops: cfg.HighQualityHops,
+				Keywords:        cfg.ScanKeywords,
+			}, reporter)
+			if err != nil {
+				return out, err
+			}
+			out.Scan = scanRes
+			qualityFile, err := qualityFromScan(scanRes)
+			if err != nil {
+				return out, err
+			}
+			speedInput = qualityFile
+			out.QualityFile = qualityFile
+		}
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
 	}
 
 	speedPrefix := filepath.Join(runDir, tag+"_speed")
@@ -267,6 +282,7 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 	speedRes, err := cfspeed.Run(ctx, cfspeed.Config{
 		Mode:               cfg.SpeedMode,
 		Protocol:           cfg.SpeedProtocol,
+		SingleIP:           cfg.SingleIP,
 		InputFile:          speedInput,
 		OutputPrefix:       speedPrefix,
 		HistoryFile:        filepath.Join(runDir, "speed_test_results.csv"),
@@ -319,6 +335,9 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 		out.Connectivity = connRes
 	}
 
+	if ctx.Err() != nil {
+		return out, fmt.Errorf("任务已取消: %w", ctx.Err())
+	}
 	reporter.Stage("pipeline", "[完成] 运行目录 %s", runDir)
 	return out, nil
 }

@@ -63,7 +63,7 @@ func (c Config) withDefaults() Config {
 	if c.FetchRetries < 0 {
 		c.FetchRetries = cfcommon.DefaultColoRetries
 	}
-	if c.MaxLatency <= 0 {
+	if c.MaxLatency < 0 {
 		c.MaxLatency = cfcommon.DefaultConnLatency
 	}
 	if c.MaxPacketLoss < 0 {
@@ -141,7 +141,7 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 			mu.Lock()
 			testResults = append(testResults, result)
 			mu.Unlock()
-			if result.Score >= 80 && result.PacketLoss < cfg.MaxPacketLoss {
+			if result.Score >= 80 && (cfg.MaxPacketLoss <= 0 || result.PacketLoss <= cfg.MaxPacketLoss) {
 				progress.Hit(fmt.Sprintf("优质: %s [%s] 延迟%dms 速度%.0fMbps 评分%.0f",
 					result.IP, result.DataCenter, result.AvgLatency.Milliseconds(), result.DownloadSpeed, result.Score))
 				reporter.Emit(cfcommon.Event{Stage: "cfconnectivity", Kind: cfcommon.KindResult, IP: result.IP, Extra: result,
@@ -405,7 +405,10 @@ func filterPremium(cfg Config, results []ConnectivityResult) []ConnectivityResul
 	maxLatMs := float64(cfg.MaxLatency)
 	for _, r := range results {
 		latMs := float64(r.AvgLatency.Nanoseconds()) / 1e6
-		if r.PacketLoss <= cfg.MaxPacketLoss && r.DownloadSpeed >= cfg.MinSpeed && latMs <= maxLatMs && r.SuccessRate >= 90 {
+		if (cfg.MaxPacketLoss <= 0 || r.PacketLoss <= cfg.MaxPacketLoss) &&
+			r.DownloadSpeed >= cfg.MinSpeed &&
+			(cfg.MaxLatency <= 0 || latMs <= maxLatMs) &&
+			r.SuccessRate >= 90 {
 			premium = append(premium, r)
 		}
 	}

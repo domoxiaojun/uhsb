@@ -59,7 +59,7 @@ func TestDefaultsComeFromCommon(t *testing.T) {
 		"SpeedWorkers":    {cfg.SpeedWorkers, cfcommon.DefaultWorkers},
 		"SpeedRounds":     {cfg.SpeedRounds, cfcommon.DefaultTestRounds},
 		"SpeedTimeout":    {cfg.SpeedTimeout, cfcommon.DefaultConnectTimeout},
-		"SpeedLatency":    {cfg.SpeedLatency, cfcommon.DefaultMaxLatency},
+		"SpeedLatency":    {cfg.SpeedLatency, 0},
 		"HighQualityHops": {cfg.HighQualityHops, cfcommon.DefaultHighQualityHops},
 		"ConnWorkers":     {cfg.ConnWorkers, cfcommon.DefaultConnWorkers},
 		"ConnRounds":      {cfg.ConnRounds, cfcommon.DefaultConnRounds},

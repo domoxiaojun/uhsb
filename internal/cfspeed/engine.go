@@ -96,7 +96,7 @@ func (c Config) withDefaults() Config {
 	if c.ConnectTimeout <= 0 {
 		c.ConnectTimeout = cfcommon.DefaultConnectTimeout
 	}
-	if c.MaxLatency <= 0 {
+	if c.MaxLatency < 0 {
 		c.MaxLatency = cfcommon.DefaultMaxLatency
 	}
 	if c.Port <= 0 {
@@ -444,8 +444,16 @@ func (s *session) calculateScore(r TestResult) float64 {
 
 func (s *session) isPremium(r TestResult) bool {
 	return r.DownloadMbps >= s.cfg.MinSpeedMbps &&
-		r.AvgLatency.Milliseconds() <= int64(s.cfg.MaxLatency) &&
-		r.PacketLoss <= s.cfg.MaxPacketLoss
+		latencyWithin(r.AvgLatency, s.cfg.MaxLatency) &&
+		lossWithin(r.PacketLoss, s.cfg.MaxPacketLoss)
+}
+
+func latencyWithin(lat time.Duration, limitMs int) bool {
+	return limitMs <= 0 || lat.Milliseconds() <= int64(limitMs)
+}
+
+func lossWithin(loss, limit float64) bool {
+	return limit <= 0 || loss <= limit
 }
 
 func (s *session) vmessNode(ip, colo string) singbox.Node {
@@ -474,11 +482,9 @@ func (s *session) attachNode(result *TestResult) {
 }
 
 func (s *session) measureSpeed(ctx context.Context, ip string, timeout time.Duration) (float64, error) {
-	speedCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	target := BuildDownloadURL(s.cfg.Protocol, s.cfg.SpeedHost, s.cfg.DownloadSizeMB)
 	if s.box != nil && s.cfg.VMessUUID != "" && s.cfg.VMessHost != "" {
-		// 启动内核单独计时，不占用测速窗口，避免慢启动压缩有效测速时间
+		// 启动内核单独计时，不占用测速窗口，避免慢启动压缩有效测速时间。
 		startCtx, startCancel := context.WithTimeout(ctx, 15*time.Second)
 		inst, err := s.box.Start(startCtx, s.vmessNode(ip, ""))
 		startCancel()
@@ -490,10 +496,14 @@ func (s *session) measureSpeed(ctx context.Context, ip string, timeout time.Dura
 				s.reporter.Warn("cfspeed", "关闭 sing-box 实例失败: %v", closeErr)
 			}
 		}()
+		speedCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
 		speed, _, err := cfcommon.MeasureDownloadSpeedViaProxy(speedCtx, inst.ProxyURL, target,
 			timeout, 0, s.cfg.EarlyCheckDur, s.cfg.EarlyMinSpeed, 256*1024)
 		return speed, err
 	}
+	speedCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	speed, _, err := cfcommon.MeasureDownloadSpeed(speedCtx, ip, target,
 		timeout, 0, s.cfg.EarlyCheckDur, s.cfg.EarlyMinSpeed, 256*1024)
 	return speed, err
@@ -511,11 +521,11 @@ func (s *session) testBatchCandidate(ctx context.Context, ip string) (TestResult
 		return result, false
 	}
 	result.PacketLoss = loss
-	if result.PacketLoss > s.cfg.MaxPacketLoss {
+	if !lossWithin(result.PacketLoss, s.cfg.MaxPacketLoss) {
 		return result, false
 	}
 	summarizeLatencies(&result, latencies)
-	if result.AvgLatency.Milliseconds() > int64(s.cfg.MaxLatency) {
+	if !latencyWithin(result.AvgLatency, s.cfg.MaxLatency) {
 		return result, false
 	}
 	speed, err := s.measureSpeed(ctx, ip, 30*time.Second)
@@ -658,7 +668,7 @@ launch:
 			defer func() { <-sem; wg.Done(); progress.Inc() }()
 			timeout := time.Duration(cfg.ConnectTimeout) * time.Second
 			roundCtx, cancel := context.WithTimeout(ctx, timeout)
-			lat, err := cfcommon.MeasureTCPLatency(roundCtx, ip, "443", timeout)
+			lat, err := cfcommon.MeasureTCPLatency(roundCtx, ip, s.latencyPort(), timeout)
 			cancel()
 			completed.Add(1)
 			if err == nil {
@@ -718,7 +728,7 @@ func runSingle(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Re
 	}
 	timeout := time.Duration(cfg.ConnectTimeout) * time.Second
 	roundCtx, cancel := context.WithTimeout(ctx, timeout)
-	lat, err := cfcommon.MeasureTCPLatency(roundCtx, ip, "443", timeout)
+	lat, err := cfcommon.MeasureTCPLatency(roundCtx, ip, s.latencyPort(), timeout)
 	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("延迟测试失败: %w", err)

@@ -3,6 +3,7 @@ package singbox
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -114,14 +115,57 @@ func (n Node) outbound() map[string]any {
 		"uuid":        n.UUID,
 		"security":    "auto",
 		"tls":         tls,
-		"transport": map[string]any{
-			"type": "ws",
-			"path": n.Path,
-			"headers": map[string]any{
-				"Host": n.Host,
-			},
+		"transport": wsTransport(n.Path, n.Host),
+	}
+}
+
+// wsTransport 把 V2Ray/Xray 分享链接里的 `path?ed=2048` 翻译成 sing-box 字段。
+// sing-box 1.14 不会解析 path 中的 ed 查询；若原样写入，问号会被当成路径的
+// 一部分，WebSocket 握手返回 404。ed 是路径上的早期数据长度，对应
+// max_early_data；不设置 early_data_header_name，让 sing-box 按 Xray 的
+// 默认方式把早期数据追加到路径末尾。
+func wsTransport(path, host string) map[string]any {
+	cleanPath, earlyData := splitEarlyData(path)
+	transport := map[string]any{
+		"type": "ws",
+		"path": cleanPath,
+		"headers": map[string]any{
+			"Host": host,
 		},
 	}
+	if earlyData > 0 {
+		transport["max_early_data"] = earlyData
+	}
+	return transport
+}
+
+func splitEarlyData(path string) (string, int) {
+	u, err := url.Parse(path)
+	if err != nil || u.RawQuery == "" {
+		return path, 0
+	}
+	query := u.Query()
+	raw := query.Get("ed")
+	if raw == "" {
+		return path, 0
+	}
+	earlyData, err := strconv.Atoi(raw)
+	if err != nil || earlyData < 0 {
+		return path, 0
+	}
+	query.Del("ed")
+	u.RawQuery = query.Encode()
+	cleaned := u.Path
+	if cleaned == "" {
+		cleaned = "/"
+	}
+	if !strings.HasPrefix(cleaned, "/") {
+		cleaned = "/" + cleaned
+	}
+	if u.RawQuery != "" {
+		cleaned += "?" + u.RawQuery
+	}
+	return cleaned, earlyData
 }
 
 func runtimeConfig(n Node, listen string, listenPort int) map[string]any {

@@ -91,9 +91,13 @@ type runRequest struct {
 	Detail          bool
 	SkipScan        bool
 	RunConnect      bool
+	SpeedMode       string
+	SpeedProtocol   string
+	SingleIP        string
 	SpeedSize       int
 	SpeedMinMbps    *float64
 	SpeedLoss       *float64
+	SpeedLatency    *int
 	HighQualityHops *int
 	ScanKeywords    string
 	HostHeader      string
@@ -364,6 +368,9 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"size":          cfcommon.DefaultSpeedSize,
 			"speed":         cfcommon.DefaultMinSpeedMbps,
 			"loss":          cfcommon.DefaultMaxPacketLoss,
+			"latency":       cfcommon.DefaultMaxLatency,
+			"speedMode":     cfcommon.DefaultSpeedMode,
+			"protocol":      cfcommon.DefaultSpeedProtocol,
 			"hops":          cfcommon.DefaultHighQualityHops,
 			"keywords":      envOr("CFSCAN_KEYWORDS", cfcommon.DefaultKeywords),
 			"uuidSet":       envOr("VMESS_UUID", "") != "",
@@ -481,9 +488,13 @@ func buildPipelineConfig(req runRequest) cfpipeline.Config {
 		Detail:             req.Detail,
 		SkipScan:           req.SkipScan,
 		RunConnect:         req.RunConnect,
+		SpeedMode:          req.SpeedMode,
+		SpeedProtocol:      req.SpeedProtocol,
+		SingleIP:           strings.TrimSpace(req.SingleIP),
 		SpeedSize:          req.SpeedSize,
 		SpeedMinMbps:       cfcommon.DefaultMinSpeedMbps,
 		SpeedLoss:          cfcommon.DefaultMaxPacketLoss,
+		SpeedLatency:       cfcommon.DefaultMaxLatency,
 		HighQualityHops:    cfcommon.DefaultHighQualityHops,
 		ScanKeywords:       strings.TrimSpace(req.ScanKeywords),
 		ConnSpeed:          cfcommon.DefaultConnSpeed,
@@ -505,6 +516,9 @@ func buildPipelineConfig(req runRequest) cfpipeline.Config {
 	}
 	if req.SpeedLoss != nil {
 		cfg.SpeedLoss = *req.SpeedLoss
+	}
+	if req.SpeedLatency != nil {
+		cfg.SpeedLatency = *req.SpeedLatency
 	}
 	if req.HighQualityHops != nil {
 		cfg.HighQualityHops = *req.HighQualityHops
@@ -543,8 +557,21 @@ func validateRunConfig(cfg *cfpipeline.Config) error {
 	cfg.SpeedWorkers = clampInt(cfg.SpeedWorkers, 1, cfcommon.MaxSpeedWorkers, cfcommon.DefaultWorkers)
 	cfg.ConnWorkers = clampInt(cfg.ConnWorkers, 1, cfcommon.MaxConnWorkers, cfcommon.DefaultConnWorkers)
 	cfg.ConnSize = clampInt(cfg.ConnSize, 1, cfcommon.MaxConnSize, cfcommon.DefaultConnSize)
-	if cfg.SpeedMinMbps < 0 || cfg.SpeedLoss < 0 || cfg.ConnLoss < 0 || cfg.ConnSpeed < 0 {
+	if cfg.SpeedMinMbps < 0 || cfg.SpeedLoss < 0 || cfg.SpeedLatency < 0 || cfg.ConnLoss < 0 || cfg.ConnSpeed < 0 {
 		return fmt.Errorf("阈值不能为负")
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.SpeedMode)) {
+	case "", "batch", "optimize", "single":
+	default:
+		return fmt.Errorf("无效的测速模式: %q", cfg.SpeedMode)
+	}
+	if strings.EqualFold(cfg.SpeedMode, "single") && net.ParseIP(cfg.SingleIP) == nil {
+		return fmt.Errorf("单 IP 测速需要合法的 IP")
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.SpeedProtocol)) {
+	case "", "http", "https":
+	default:
+		return fmt.Errorf("无效的测速协议: %q", cfg.SpeedProtocol)
 	}
 	// -1 = 关闭「高跳数视为优质」启发式；0 = 用 cfcommon.DefaultHighQualityHops。
 	if cfg.HighQualityHops < -1 || cfg.HighQualityHops > cfcommon.MaxHighQualityHops {

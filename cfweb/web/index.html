@@ -46,6 +46,11 @@ button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor
 .warn { background: #faeeda; color: var(--warn); }
 .err { background: #fcebeb; color: var(--err); }
 .files a { display: inline-block; margin: 0 8px 8px 0; color: var(--blue); }
+.bar { height: 8px; background: #eceae4; border-radius: 999px; overflow: hidden; margin-top: 10px; }
+.bar > div { height: 100%; width: 0; background: var(--blue); }
+.progress-text { color: var(--muted); font-size: 12px; margin-top: 6px; }
+details summary { cursor: pointer; color: var(--muted); margin-top: 12px; }
+.copy { margin-left: 8px; padding: 2px 8px; background: var(--blue-bg); color: var(--blue); }
 </style>
 </head>
 <body>
@@ -55,6 +60,16 @@ button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor
 </header>
 <main>
   <section class="card">
+    <label>测速方式</label>
+    <select id="speedmode">
+      <option value="batch">批量评分：扫完再测全部</option>
+      <option value="optimize">优选：找到达标地址即停</option>
+      <option value="single">单 IP 测速：不扫描</option>
+    </select>
+    <div id="singlebox">
+      <label>要测的 IP</label>
+      <input id="singleip" placeholder="只在「单 IP 测速」时使用">
+    </div>
     <label>cfdata 模式</label>
     <select id="mode">
       <option value="1">1 · 指定 colo 扫描</option>
@@ -70,8 +85,14 @@ button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor
       <div><label>每 colo 数量</label><input id="num" type="number" placeholder="8"></div>
     </div>
     <div class="row">
+      <div><label>测速协议</label>
+        <select id="protocol"><option value="http">HTTP</option><option value="https">HTTPS</option></select>
+      </div>
       <div><label>测速大小 MB</label><input id="size" type="number" placeholder="50"></div>
+    </div>
+    <div class="row">
       <div><label>最低 Mbps（0 = 不限）</label><input id="speed" type="number" placeholder="50"></div>
+      <div><label>最大延迟 ms（0 = 不限）</label><input id="latency" type="number" placeholder="200"></div>
     </div>
     <div class="row">
       <div><label>最大丢包率 %（0 = 不限）</label><input id="loss" type="number" placeholder="10"></div>
@@ -107,11 +128,13 @@ button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor
         <strong>实时日志</strong>
         <span class="pill" id="busy">空闲</span>
       </div>
+      <div class="bar" aria-hidden="true"><div id="bar"></div></div>
+      <div class="progress-text" id="progress">等待开始</div>
       <div class="log" id="log"></div>
     </div>
     <div class="card" style="margin-bottom:16px">
       <strong>命中 / 测速结果</strong>
-      <table class="hits"><thead><tr><th>阶段</th><th>IP</th><th>信息</th></tr></thead><tbody id="hits"></tbody></table>
+      <table class="hits"><thead><tr><th>阶段</th><th>IP</th><th>延迟</th><th>速度</th><th>信息</th><th></th></tr></thead><tbody id="hits"></tbody></table>
     </div>
     <div class="card">
       <strong>运行历史</strong>
@@ -141,15 +164,52 @@ function line(text) {
 function clearUI() {
   logEl.textContent = '';
   hitsEl.replaceChildren();
+  $('bar').style.width = '0';
+  $('progress').textContent = '等待开始';
 }
 
-function addHit(stage, ip, msg) {
+function updateProgress(e) {
+  const done = Number(e.done || 0);
+  const total = Number(e.total || 0);
+  const pct = total > 0 ? Math.min(100, done / total * 100) : 0;
+  $('bar').style.width = pct.toFixed(1) + '%';
+  const hit = e.hit ? ' · 命中 ' + e.hit : '';
+  const msg = e.message ? ' · ' + e.message : '';
+  $('progress').textContent = (e.stage || '进度') + ' ' + done + '/' + total + hit + msg;
+}
+
+function addHit(e) {
+  const extra = e.extra || {};
+  const lat = extra.avg_latency_ms;
+  const mbps = extra.download_mbps;
   const tr = document.createElement('tr');
-  const td1 = document.createElement('td'); td1.textContent = stage || '';
-  const td2 = document.createElement('td'); td2.textContent = ip || '';
-  const td3 = document.createElement('td'); td3.textContent = msg || '';
-  tr.append(td1, td2, td3);
-  hitsEl.prepend(tr);
+  tr.dataset.mbps = mbps || 0;
+  const cells = [
+    e.stage || '',
+    e.ip || '',
+    lat ? lat + ' ms' : '',
+    mbps ? Number(mbps).toFixed(1) + ' Mbps' : '',
+    e.message || '',
+  ];
+  cells.forEach(text => {
+    const td = document.createElement('td');
+    td.textContent = text;
+    tr.appendChild(td);
+  });
+  const action = document.createElement('td');
+  if (e.ip) {
+    const btn = document.createElement('button');
+    btn.className = 'copy';
+    btn.type = 'button';
+    btn.textContent = '复制';
+    btn.onclick = () => navigator.clipboard.writeText(e.ip).then(() => { btn.textContent = '已复制'; });
+    action.appendChild(btn);
+  }
+  tr.appendChild(action);
+  const rows = Array.from(hitsEl.children);
+  const index = rows.findIndex(row => Number(row.dataset.mbps || 0) < Number(tr.dataset.mbps || 0));
+  if (index === -1) hitsEl.appendChild(tr);
+  else hitsEl.insertBefore(tr, rows[index]);
 }
 
 class ApiError extends Error {
@@ -245,9 +305,12 @@ function applyDefaults(d, s) {
   fill('iptype', d.ipType);
   fill('target', d.target);
   fill('num', d.num);
+  fill('speedmode', d.speedMode);
+  fill('protocol', d.protocol);
   fill('size', d.size);
   fill('speed', d.speed);
   fill('loss', d.loss);
+  fill('latency', d.latency);
   fill('hops', d.hops);
   fill('keywords', d.keywords);
   fill('wspath', d.path);
@@ -320,6 +383,10 @@ function poll() {
 startBtn.onclick = async () => {
   const mode = $('mode').value;
   const target = $('target').value;
+  if ($('speedmode').value === 'single' && !$('singleip').value.trim()) {
+    statusEl.textContent = '单 IP 测速需要填写 IP';
+    return;
+  }
   if ($('singbox').checked) {
     const uuid = $('uuid').value.trim();
     const host = $('wshost').value.trim();
@@ -335,9 +402,13 @@ startBtn.onclick = async () => {
     Detail: $('detail').checked,
     SkipScan: $('skipscan').checked,
     RunConnect: $('connect').checked,
+    SpeedMode: $('speedmode').value,
+    SpeedProtocol: $('protocol').value,
+    SingleIP: $('singleip').value.trim(),
     SpeedSize: Number($('size').value),
     SpeedMinMbps: Number($('speed').value),
     SpeedLoss: Number($('loss').value),
+    SpeedLatency: Number($('latency').value),
     HighQualityHops: Number($('hops').value),
     ScanKeywords: $('keywords').value.trim(),
     UseSingBox: $('singbox').checked,
@@ -356,11 +427,16 @@ startBtn.onclick = async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    }, 1);
+    }, 0);
     statusEl.textContent = '已启动';
     setBusy(true);
     poll();
   } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      statusEl.textContent = '已有任务在跑，正在同步状态';
+      refreshStatus().catch(showError);
+      return;
+    }
     showError(err);
     setBusy(false);
   }
@@ -369,7 +445,7 @@ startBtn.onclick = async () => {
 stopBtn.onclick = async () => {
   stopBtn.disabled = true;
   try {
-    await api('/api/stop', { method: 'POST' }, 1);
+    await api('/api/stop', { method: 'POST' }, 0);
     statusEl.textContent = '已请求停止，等待当前探测退出…';
   } catch (err) {
     showError(err);
@@ -388,8 +464,10 @@ es.onmessage = (ev) => {
   let e;
   try { e = JSON.parse(ev.data); } catch (_) { return; }
   if (e.kind === 'reset') { clearUI(); return; }
+  if (e.kind === 'progress') { updateProgress(e); return; }
+  if (e.kind === 'progress_done') { $('bar').style.width = '100%'; }
   if (e.message) line((e.stage ? '[' + e.stage + '] ' : '') + e.message);
-  if ((e.kind === 'hit' || e.kind === 'result') && e.ip) addHit(e.stage, e.ip, e.message);
+  if ((e.kind === 'hit' || e.kind === 'result') && e.ip) addHit(e);
   if (e.kind === 'done') { poll(); refreshRuns().catch(showError); }
 };
 
