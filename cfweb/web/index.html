@@ -24,6 +24,8 @@ body { margin: 0; font: 14px/1.5 var(--font); color: var(--ink); background: var
 header { padding: 16px 24px 8px; }
 h1 { margin: 0; font-size: 18px; font-weight: 600; }
 .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.sub.offline { color: var(--err); }
+.sub.insecure { color: var(--err); font-weight: 600; }
 main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 0 24px 24px; }
 @media (max-width: 960px) { main { grid-template-columns: 1fr; } }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
@@ -60,17 +62,23 @@ button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor
       <option value="3">3 · 按国家筛</option>
     </select>
     <label>目标 colo / 国家</label>
-    <input id="target" value="HKG,NRT" placeholder="HKG,NRT 或 HK,JP">
+    <input id="target" placeholder="HKG,NRT 或 HK,JP">
     <div class="row">
       <div><label>IP 类型</label>
         <select id="iptype"><option value="4">IPv4</option><option value="6">IPv6</option></select>
       </div>
-      <div><label>每 colo 数量</label><input id="num" type="number" value="8"></div>
+      <div><label>每 colo 数量</label><input id="num" type="number" placeholder="8"></div>
     </div>
     <div class="row">
-      <div><label>测速大小 MB</label><input id="size" type="number" value="50"></div>
-      <div><label>最低 Mbps</label><input id="speed" type="number" value="50"></div>
+      <div><label>测速大小 MB</label><input id="size" type="number" placeholder="50"></div>
+      <div><label>最低 Mbps（0 = 不限）</label><input id="speed" type="number" placeholder="50"></div>
     </div>
+    <div class="row">
+      <div><label>最大丢包率 %（0 = 不限）</label><input id="loss" type="number" placeholder="10"></div>
+      <div><label>高跳数阈值（-1 = 关闭）</label><input id="hops" type="number" placeholder="16"></div>
+    </div>
+    <label>cfscan 路由关键字（逗号分隔，扫 NRT/SIN 可填 nrt,sin）</label>
+    <input id="keywords" placeholder="hkg,tpe,tw,hk">
     <label><input id="detail" type="checkbox" checked> cfdata 详细延迟测试</label>
     <label><input id="skipscan" type="checkbox"> 跳过 cfscan（无 mtr 时自动勾选）</label>
     <label><input id="connect" type="checkbox"> 追加 cfconnectivity 复核</label>
@@ -82,13 +90,14 @@ button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor
     <label>SNI（留空 = 用环境变量 VMESS_SNI，再退回 WS Host）</label>
     <input id="sni" placeholder="留空则跟随 WS Host">
     <div class="row">
-      <div><label>WS Path</label><input id="wspath" value="/"></div>
-      <div><label>端口</label><input id="vmessport" type="number" value="443"></div>
+      <div><label>WS Path</label><input id="wspath" placeholder="/"></div>
+      <div><label>端口</label><input id="vmessport" type="number" placeholder="443"></div>
     </div>
     <label><input id="vmesstls" type="checkbox" checked> TLS</label>
+    <label><input id="allowinsecure" type="checkbox"> 允许无效证书（自签节点）</label>
     <div class="actions">
-      <button class="primary" id="start">开始流水线</button>
-      <button class="ghost" id="stop">停止</button>
+      <button class="primary" id="start" disabled>开始流水线</button>
+      <button class="ghost" id="stop" disabled>停止</button>
     </div>
     <div class="status" id="status"></div>
   </section>
@@ -112,13 +121,17 @@ button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor
   </section>
 </main>
 <script>
-const logEl = document.getElementById('log');
-const hitsEl = document.getElementById('hits');
-const statusEl = document.getElementById('status');
-const busyEl = document.getElementById('busy');
-const metaEl = document.getElementById('meta');
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+const hitsEl = $('hits');
+const statusEl = $('status');
+const busyEl = $('busy');
+const metaEl = $('meta');
+const startBtn = $('start');
+const stopBtn = $('stop');
 let defaultsApplied = false;
 let uuidConfigured = false;
+let busy = false;
 
 function line(text) {
   logEl.textContent += text + '\n';
@@ -139,25 +152,133 @@ function addHit(stage, ip, msg) {
   hitsEl.prepend(tr);
 }
 
+class ApiError extends Error {
+  constructor(status, code, message, requestId) {
+    super(message);
+    this.status = status;
+    this.code = code;
+    this.requestId = requestId;
+  }
+}
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function setOnline(ok, detail) {
+  if (ok) {
+    busyEl.title = '';
+    metaEl.classList.remove('offline');
+    startBtn.disabled = !defaultsApplied || busy;
+    stopBtn.disabled = !busy;
+  } else {
+    startBtn.disabled = true;
+    stopBtn.disabled = true;
+    metaEl.classList.add('offline');
+    if (detail) metaEl.textContent = '服务不可达：' + detail + '（正在重试）';
+  }
+}
+
+function setBusy(v) {
+  busy = !!v;
+  busyEl.textContent = busy ? '运行中' : '空闲';
+  busyEl.className = 'pill ' + (busy ? 'warn' : 'ok');
+  startBtn.disabled = !defaultsApplied || busy;
+  stopBtn.disabled = !busy;
+}
+
+function showError(e) {
+  if (e instanceof ApiError) {
+    statusEl.textContent = e.message + (e.requestId ? '（请求 ID ' + e.requestId + '）' : '');
+  } else if (e && e.name === 'AbortError') {
+    statusEl.textContent = '请求超时，请检查服务是否繁忙';
+  } else {
+    statusEl.textContent = '无法连接服务：' + (e && e.message ? e.message : '未知错误');
+  }
+}
+
+// 统一 API 客户端：超时、结构化错误、4xx 不重试、5xx/网络错误指数退避重试。
+async function api(path, opts = {}, retries = 2) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.timeout || 12000);
+    try {
+      const res = await fetch(path, Object.assign({}, opts, { signal: controller.signal }));
+      clearTimeout(timer);
+      let payload = null;
+      const text = await res.text();
+      if (text) { try { payload = JSON.parse(text); } catch (_) { payload = null; } }
+      if (!res.ok) {
+        const info = (payload && payload.error) || {};
+        const err = new ApiError(res.status, info.code || 'http_error',
+          info.message || ('HTTP ' + res.status), info.request_id || '');
+        if (res.status < 500) { setOnline(true); throw err; } // 4xx 是调用方问题，重试没意义
+        lastErr = err;
+        // 5xx 说明服务端不可用，必须标记离线并禁用按钮，不能只记错误还显示在线。
+        setOnline(false, err.message);
+      } else {
+        setOnline(true);
+        return payload;
+      }
+    } catch (e) {
+      clearTimeout(timer);
+      if (e instanceof ApiError && e.status < 500) throw e;
+      lastErr = e;
+      setOnline(false, (e && e.message) || '连接失败');
+    }
+    if (attempt < retries) await sleep(400 * Math.pow(2, attempt));
+  }
+  throw lastErr || new Error('请求失败');
+}
+
+function applyDefaults(d, s) {
+  if (!d) return;
+  // <select> 天生有默认选中项，value 永远不为空，用「是否已套用过默认值」
+  // 标记来判断，否则 dataMode / ipType 的下发会永远失效。
+  const fill = (id, value) => {
+    if (value === undefined || value === null) return;
+    const el = $(id);
+    if (el.dataset.defaulted === '1') return;
+    el.value = String(value);
+    el.dataset.defaulted = '1';
+  };
+  fill('mode', d.dataMode);
+  fill('iptype', d.ipType);
+  fill('target', d.target);
+  fill('num', d.num);
+  fill('size', d.size);
+  fill('speed', d.speed);
+  fill('loss', d.loss);
+  fill('hops', d.hops);
+  fill('keywords', d.keywords);
+  fill('wspath', d.path);
+  fill('vmessport', d.port);
+  if (d.host) $('wshost').value = d.host;
+  uuidConfigured = !!d.uuidSet;
+  if (uuidConfigured) $('uuid').placeholder = '服务端已配置，留空即可';
+  $('sni').placeholder = d.sni ? ('留空 = ' + d.sni) : '留空则跟随 WS Host';
+  $('vmesstls').checked = !!d.tls;
+  $('allowinsecure').checked = !!d.allowInsecure;
+  // 只在首次拉状态时自动勾选；否则每 4s 的轮询会把用户手动取消的勾选又勾回来。
+  if (!s.mtr) $('skipscan').checked = true;
+  if (s.singbox && d.host && (uuidConfigured || $('uuid').value)) $('singbox').checked = true;
+  defaultsApplied = true;
+}
+
 async function refreshStatus() {
-  const s = await (await fetch('/api/status')).json();
+  const s = await api('/api/status', {}, 1);
   metaEl.textContent = `v${s.version} · ${s.goos} · 访问范围 ${s.allow} · ${s.root}`
     + (s.mtr ? ' · mtr 可用' : ' · mtr 不可用，建议跳过 cfscan')
-    + (s.singbox ? ' · sing-box 可用' : ' · 未检测到 sing-box');
-  busyEl.textContent = s.busy ? '运行中' : '空闲';
-  busyEl.className = 'pill ' + (s.busy ? 'warn' : 'ok');
-  if (!s.mtr) document.getElementById('skipscan').checked = true;
-  if (!defaultsApplied && s.defaults) {
-    defaultsApplied = true;
-    uuidConfigured = !!s.defaults.uuidSet;
-    if (uuidConfigured) document.getElementById('uuid').placeholder = '服务端已配置，留空即可';
-    if (s.defaults.host) document.getElementById('wshost').value = s.defaults.host;
-    if (s.defaults.path) document.getElementById('wspath').value = s.defaults.path;
-    if (s.defaults.port) document.getElementById('vmessport').value = s.defaults.port;
-    document.getElementById('sni').placeholder = s.defaults.sni ? ('留空 = ' + s.defaults.sni) : '留空则跟随 WS Host';
-    document.getElementById('vmesstls').checked = !!s.defaults.tls;
-    if (s.singbox && s.defaults.host && (uuidConfigured || document.getElementById('uuid').value)) {
-      document.getElementById('singbox').checked = true;
+    + (s.singbox ? ' · sing-box 可用' : ' · 未检测到 sing-box')
+    + (s.insecure ? ' · ⚠ CFWEB_ALLOW=any：任何来源都可访问本控制台' : '');
+  metaEl.classList.toggle('insecure', !!s.insecure);
+  setBusy(s.busy);
+  if (!defaultsApplied) {
+    if (s.defaults) {
+      applyDefaults(s.defaults, s);
+      setBusy(s.busy); // 重新按 defaultsApplied 刷新按钮可用态
+    } else {
+      statusEl.textContent = '服务端未返回表单默认值，请刷新页面重试';
+      return s;
     }
   }
   if (s.error) statusEl.textContent = s.error;
@@ -166,36 +287,42 @@ async function refreshStatus() {
 }
 
 async function refreshRuns() {
-  const names = await (await fetch('/api/runs')).json();
-  const box = document.getElementById('runs');
+  const names = await api('/api/runs', {}, 1) || [];
+  const box = $('runs');
   box.replaceChildren();
-  (names || []).slice(0, 12).forEach(name => {
+  names.slice(0, 12).forEach(name => {
     const a = document.createElement('a');
     a.href = '#';
     a.textContent = name;
     a.onclick = async (e) => {
       e.preventDefault();
-      const files = await (await fetch('/api/files?run=' + encodeURIComponent(name))).json();
-      const fbox = document.getElementById('files');
-      fbox.replaceChildren();
-      (files || []).forEach(file => {
-        const fa = document.createElement('a');
-        fa.href = '/api/files?run=' + encodeURIComponent(name) + '&file=' + encodeURIComponent(file);
-        fa.textContent = file;
-        fa.target = '_blank';
-        fbox.appendChild(fa);
-      });
+      try {
+        const files = await api('/api/files?run=' + encodeURIComponent(name), {}, 1) || [];
+        const fbox = $('files');
+        fbox.replaceChildren();
+        files.forEach(file => {
+          const fa = document.createElement('a');
+          fa.href = '/api/files?run=' + encodeURIComponent(name) + '&file=' + encodeURIComponent(file);
+          fa.textContent = file;
+          fa.target = '_blank';
+          fbox.appendChild(fa);
+        });
+      } catch (err) { showError(err); }
     };
     box.appendChild(a);
   });
 }
 
-document.getElementById('start').onclick = async () => {
-  const mode = document.getElementById('mode').value;
-  const target = document.getElementById('target').value;
-  if (document.getElementById('singbox').checked) {
-    const uuid = document.getElementById('uuid').value.trim();
-    const host = document.getElementById('wshost').value.trim();
+function poll() {
+  refreshStatus().catch(showError);
+}
+
+startBtn.onclick = async () => {
+  const mode = $('mode').value;
+  const target = $('target').value;
+  if ($('singbox').checked) {
+    const uuid = $('uuid').value.trim();
+    const host = $('wshost').value.trim();
     if (!host) { statusEl.textContent = '启用 sing-box 时必须填写 WS Host'; return; }
     if (!uuid && !uuidConfigured) { statusEl.textContent = '启用 sing-box 时必须填写 UUID'; return; }
   }
@@ -203,48 +330,74 @@ document.getElementById('start').onclick = async () => {
     DataMode: mode,
     Colo: mode === '3' ? '' : target,
     Country: mode === '3' ? target : '',
-    IPType: document.getElementById('iptype').value,
-    NumPerColo: Number(document.getElementById('num').value),
-    Detail: document.getElementById('detail').checked,
-    SkipScan: document.getElementById('skipscan').checked,
-    RunConnect: document.getElementById('connect').checked,
-    SpeedSize: Number(document.getElementById('size').value),
-    SpeedMinMbps: Number(document.getElementById('speed').value),
-    UseSingBox: document.getElementById('singbox').checked,
-    VMessUUID: document.getElementById('uuid').value.trim(),
-    VMessHost: document.getElementById('wshost').value.trim(),
-    VMessSNI: document.getElementById('sni').value.trim(),
-    VMessPath: document.getElementById('wspath').value,
-    VMessPort: Number(document.getElementById('vmessport').value),
-    VMessTLS: document.getElementById('vmesstls').checked,
+    IPType: $('iptype').value,
+    NumPerColo: Number($('num').value),
+    Detail: $('detail').checked,
+    SkipScan: $('skipscan').checked,
+    RunConnect: $('connect').checked,
+    SpeedSize: Number($('size').value),
+    SpeedMinMbps: Number($('speed').value),
+    SpeedLoss: Number($('loss').value),
+    HighQualityHops: Number($('hops').value),
+    ScanKeywords: $('keywords').value.trim(),
+    UseSingBox: $('singbox').checked,
+    VMessUUID: $('uuid').value.trim(),
+    VMessHost: $('wshost').value.trim(),
+    VMessSNI: $('sni').value.trim(),
+    VMessPath: $('wspath').value,
+    VMessPort: Number($('vmessport').value),
+    VMessTLS: $('vmesstls').checked,
+    VMessAllowInsecure: $('allowinsecure').checked,
   };
-  clearUI();
-  const res = await fetch('/api/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-  if (!res.ok) { statusEl.textContent = await res.text(); return; }
-  statusEl.textContent = '已启动';
-  refreshStatus();
+  startBtn.disabled = true;
+  try {
+    clearUI();
+    await api('/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }, 1);
+    statusEl.textContent = '已启动';
+    setBusy(true);
+    poll();
+  } catch (err) {
+    showError(err);
+    setBusy(false);
+  }
 };
 
-document.getElementById('stop').onclick = async () => {
-  await fetch('/api/stop', { method: 'POST' });
+stopBtn.onclick = async () => {
+  stopBtn.disabled = true;
+  try {
+    await api('/api/stop', { method: 'POST' }, 1);
+    statusEl.textContent = '已请求停止，等待当前探测退出…';
+  } catch (err) {
+    showError(err);
+  }
+  poll();
 };
 
 const es = new EventSource('/api/events');
 // 每次连接（含断线自动重连）都先清空，再等服务器回放快照，避免重复
-es.onopen = () => clearUI();
+es.onopen = () => { clearUI(); setOnline(true); };
+es.onerror = () => {
+  setOnline(false, '实时日志连接中断');
+  statusEl.textContent = '实时日志连接中断，浏览器会自动重连';
+};
 es.onmessage = (ev) => {
-  const e = JSON.parse(ev.data);
+  let e;
+  try { e = JSON.parse(ev.data); } catch (_) { return; }
   if (e.kind === 'reset') { clearUI(); return; }
   if (e.message) line((e.stage ? '[' + e.stage + '] ' : '') + e.message);
-  if ((e.kind === 'hit' || e.kind === 'result') && e.ip) {
-    addHit(e.stage, e.ip, e.message);
-  }
-  if (e.kind === 'done') { refreshStatus(); refreshRuns(); }
+  if ((e.kind === 'hit' || e.kind === 'result') && e.ip) addHit(e.stage, e.ip, e.message);
+  if (e.kind === 'done') { poll(); refreshRuns().catch(showError); }
 };
 
-refreshStatus();
-refreshRuns();
-setInterval(refreshStatus, 4000);
+poll();
+refreshRuns().catch(showError);
+// 页面隐藏时暂停轮询，回到前台立即同步一次，避免后台挂着一堆无效请求。
+setInterval(() => { if (!document.hidden) poll(); }, 4000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 </script>
 </body>
 </html>

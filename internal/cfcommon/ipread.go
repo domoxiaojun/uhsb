@@ -31,16 +31,27 @@ func ReadIPs(path string) ([]string, error) {
 
 // WriteLines 将 lines 逐行写入文件(以 \n 分隔,末尾 \n)。
 func WriteLines(path string, lines []string) error {
+	return WriteLinesMode(path, lines, 0644)
+}
+
+// WriteLinesMode 允许指定文件权限。含凭据的产物必须传 0600。
+func WriteLinesMode(path string, lines []string, perm os.FileMode) error {
 	path = filepath.Clean(path)
 	if err := ensureParentDir(path); err != nil {
 		return wrapPathError("prepare output path", path, err)
 	}
-	return wrapPathError("write file", path, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0644))
+	return wrapPathError("write file", path, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), perm))
 }
 
 func WriteLinesAtomic(path string, lines []string) error {
+	return WriteLinesAtomicMode(path, lines, 0644)
+}
+
+// WriteLinesAtomicMode 原子写并指定最终文件权限。
+func WriteLinesAtomicMode(path string, lines []string, perm os.FileMode) error {
 	tempPath := TempWritePath(path)
-	if err := WriteLines(tempPath, lines); err != nil {
+	if err := WriteLinesMode(tempPath, lines, perm); err != nil {
+		_ = os.Remove(tempPath) // 走不到 ReplaceFileFromTemp 的清理逻辑
 		return err
 	}
 	return ReplaceFileFromTemp(tempPath, path)

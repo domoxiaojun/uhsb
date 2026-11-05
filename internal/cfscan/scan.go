@@ -22,18 +22,56 @@ const (
 	CMIHK       = "223.119.6.101"
 	CMIJP       = "223.118.4.105"
 	CMIUS       = "221.183.137.177"
-	DefaultHost = "www.visa.cn"
+	DefaultHost = cfcommon.DefaultHost
 
 	// DefaultHighQualityHops 是"高跳数视为优质线路"的阈值（沿用原版启发式）。
-	DefaultHighQualityHops = 16
+	DefaultHighQualityHops = cfcommon.DefaultHighQualityHops
+
+	// DefaultKeywords 是默认路由关键字（港台），保持原版行为。
+	// 扫 NRT/SIN 等其它 colo 时可用 -keywords 覆盖。
+	DefaultKeywords = cfcommon.DefaultKeywords
 )
 
-var keywordRegex = regexp.MustCompile(`\b(hkg|tpe|tw|hk)\b`)
+var (
+	defaultKeywordRegex = regexp.MustCompile(`\b(hkg|tpe|tw|hk)\b`)
+	keywordPartRe       = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+)
+
+// CompileKeywords 把逗号分隔的关键字编译成 \b(...)\b 正则。
+// 空串回落到默认港台关键字；关键字只允许字母/数字/-/_，避免任意正则
+// 造成语法错误或 ReDoS。导出供上层在启动任务前做参数校验。
+func CompileKeywords(spec string) (*regexp.Regexp, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return defaultKeywordRegex, nil
+	}
+	var parts []string
+	seen := make(map[string]bool)
+	for _, raw := range strings.Split(spec, ",") {
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			continue
+		}
+		if !keywordPartRe.MatchString(p) {
+			return nil, fmt.Errorf("非法关键字 %q：只允许字母、数字、-、_（逗号分隔）", p)
+		}
+		low := strings.ToLower(p)
+		if !seen[low] {
+			seen[low] = true
+			parts = append(parts, regexp.QuoteMeta(low))
+		}
+	}
+	if len(parts) == 0 {
+		return defaultKeywordRegex, nil
+	}
+	return regexp.MustCompile(`\b(` + strings.Join(parts, "|") + `)\b`), nil
+}
 
 var (
-	mtrProbeMu  sync.Mutex
-	mtrProbeAt  time.Time
-	mtrProbeErr error
+	mtrProbeMu   sync.Mutex
+	mtrProbeAt   time.Time
+	mtrProbeErr  error
+	mtrProbeDone chan struct{} // 非 nil 表示已有一次探测在跑，避免并发重复 fork mtr
 )
 
 type Config struct {
@@ -44,6 +82,7 @@ type Config struct {
 	MTRCycles       int
 	MTRTimeout      int
 	HighQualityHops int
+	Keywords        string
 	Verbose         bool
 	HostHeader      string
 	WorkDir         string
@@ -51,7 +90,7 @@ type Config struct {
 
 func (c Config) withDefaults() Config {
 	if c.Workers <= 0 {
-		c.Workers = 100
+		c.Workers = cfcommon.DefaultScanWorkers
 	}
 	if c.Retries < 0 {
 		c.Retries = 1
@@ -64,6 +103,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.HighQualityHops == 0 {
 		c.HighQualityHops = DefaultHighQualityHops
+	}
+	if strings.TrimSpace(c.Keywords) == "" {
+		c.Keywords = DefaultKeywords
 	}
 	if c.HostHeader == "" {
 		c.HostHeader = DefaultHost
@@ -103,18 +145,58 @@ func findMTR() (string, error) {
 // Docker 里没有 NET_RAW 也会失败。探测结果缓存 1 分钟，
 // 避免 /api/status 每几秒就 fork 一次 mtr。
 func MTRStatus() (string, error) {
+	return MTRStatusCtx(context.Background())
+}
+
+// MTRStatusCtx 与 MTRStatus 相同，但允许调用方取消探测（例如 HTTP 客户端断开）。
+// 探测过程不持有全局锁：并发调用会等待同一次在途探测，而不是排队各跑一次 mtr。
+func MTRStatusCtx(ctx context.Context) (string, error) {
 	path, err := findMTR()
 	if err != nil {
 		return "", err
 	}
-	mtrProbeMu.Lock()
-	defer mtrProbeMu.Unlock()
-	if !mtrProbeAt.IsZero() && time.Since(mtrProbeAt) < time.Minute {
-		return path, mtrProbeErr
+	for {
+		mtrProbeMu.Lock()
+		if !mtrProbeAt.IsZero() && time.Since(mtrProbeAt) < time.Minute {
+			cached := mtrProbeErr
+			mtrProbeMu.Unlock()
+			return path, cached
+		}
+		if done := mtrProbeDone; done != nil {
+			mtrProbeMu.Unlock()
+			select {
+			case <-done:
+				continue // 重新读缓存
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		done := make(chan struct{})
+		mtrProbeDone = done
+		mtrProbeMu.Unlock()
+
+		probeErr := probeMTRCtx(ctx, path)
+
+		mtrProbeMu.Lock()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// 客户端断连 / 任务取消造成的探测失败不是 mtr 的真实状态。
+			// 若把它缓存 1 分钟，之后所有任务都会误判 mtr 不可用而跳过 cfscan。
+			if mtrProbeDone == done {
+				mtrProbeDone = nil
+			}
+			mtrProbeMu.Unlock()
+			close(done)
+			return "", ctxErr
+		}
+		mtrProbeAt = time.Now()
+		mtrProbeErr = probeErr
+		if mtrProbeDone == done {
+			mtrProbeDone = nil
+		}
+		mtrProbeMu.Unlock()
+		close(done)
+		return path, probeErr
 	}
-	mtrProbeAt = time.Now()
-	mtrProbeErr = probeMTR(path)
-	return path, mtrProbeErr
 }
 
 func MTRAvailable() bool {
@@ -123,7 +205,11 @@ func MTRAvailable() bool {
 }
 
 func probeMTR(path string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	return probeMTRCtx(context.Background(), path)
+}
+
+func probeMTRCtx(parent context.Context, path string) error {
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "-r", "-c", "1", "-n", "--timeout", "2", "127.0.0.1")
 	var stderr bytes.Buffer
@@ -146,6 +232,7 @@ func resetMTRProbe() {
 	mtrProbeMu.Lock()
 	mtrProbeAt = time.Time{}
 	mtrProbeErr = nil
+	mtrProbeDone = nil
 	mtrProbeMu.Unlock()
 }
 
@@ -158,12 +245,17 @@ func firstLineOf(s string) string {
 
 func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, error) {
 	cfg = cfg.withDefaults()
+	keywordRe, err := CompileKeywords(cfg.Keywords)
+	if err != nil {
+		return nil, err
+	}
+	reporter.Log("cfscan", "[信息] 路由关键字: %s", cfg.Keywords)
 	mtrBin, err := findMTR()
 	if err != nil {
 		return nil, err
 	}
 
-	locMap, err := cfcommon.LoadLocations()
+	locMap, err := cfcommon.LoadLocationsCtx(ctx)
 	if err != nil {
 		reporter.Warn("cfscan", "%v", err)
 	} else {
@@ -223,7 +315,7 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 						case <-time.After(time.Second):
 						}
 					}
-					if r, ok := analyzeIP(ctx, cfg, locMap, mtrBin, ip); ok {
+					if r, ok := analyzeIP(ctx, cfg, locMap, mtrBin, ip, keywordRe); ok {
 						if liveSaver != nil {
 							liveSaver.WriteResult(r)
 						}
@@ -271,7 +363,9 @@ feed:
 		finalResults = append(finalResults, r)
 	}
 	if liveSaver != nil {
-		_ = liveSaver.Close()
+		if err := liveSaver.Close(); err != nil {
+			reporter.Warn("cfscan", "实时结果保存关闭失败: %v", err)
+		}
 	}
 	sort.Slice(finalResults, func(i, j int) bool {
 		return finalResults[i].HopCount > finalResults[j].HopCount
@@ -319,7 +413,7 @@ func directCMIKeyword(ip string) string {
 	return ""
 }
 
-func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Location, mtrBin, ip string) (CategorizedResult, bool) {
+func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Location, mtrBin, ip string, keywordRe *regexp.Regexp) (CategorizedResult, bool) {
 	result := CategorizedResult{IP: ip}
 	directCMI := directCMIKeyword(ip)
 
@@ -338,7 +432,7 @@ func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Locat
 		return result, false
 	}
 
-	result, ok := classifyMTR(string(output), ip, cfg.HighQualityHops)
+	result, ok := classifyMTRWithKeywords(string(output), ip, cfg.HighQualityHops, keywordRe)
 	if !ok {
 		if directCMI == "" {
 			return result, false
@@ -356,9 +450,17 @@ func analyzeIP(ctx context.Context, cfg Config, locMap map[string]cfcommon.Locat
 	return result, true
 }
 
-// classifyMTR 解析 mtr 输出，判断是否命中优质路由。
-// highQualityHops <= 0 时关闭"高跳数"启发式。
+// classifyMTR 使用默认关键字，供现有测试与默认路径调用。
 func classifyMTR(output, ip string, highQualityHops int) (CategorizedResult, bool) {
+	return classifyMTRWithKeywords(output, ip, highQualityHops, defaultKeywordRegex)
+}
+
+// classifyMTRWithKeywords 解析 mtr 输出，判断是否命中优质路由。
+// highQualityHops <= 0 时关闭"高跳数"启发式；keywordRe 为 nil 时回落到默认关键字。
+func classifyMTRWithKeywords(output, ip string, highQualityHops int, keywordRe *regexp.Regexp) (CategorizedResult, bool) {
+	if keywordRe == nil {
+		keywordRe = defaultKeywordRegex
+	}
 	result := CategorizedResult{IP: ip}
 
 	type match struct{ keyword, hop, loss, avg string }
@@ -384,7 +486,7 @@ func classifyMTR(output, ip string, highQualityHops int) (CategorizedResult, boo
 			}
 		}
 
-		if m := keywordRegex.FindString(lineLower); m != "" {
+		if m := keywordRe.FindString(lineLower); m != "" {
 			l, a := ExtractLossAvg(line)
 			matches = append(matches, match{m, trimmed, l, a})
 		}
@@ -559,7 +661,8 @@ func saveResultsToCSV(results []CategorizedResult, filename string, reporter cfc
 				r.LossPct, r.AvgMs, hop})
 		}
 	}
-	if writeErr != nil || closeFn() != nil || cfcommon.ReplaceFileFromTemp(tempFile, filename) != nil {
+	if err := cfcommon.FinishCSVWrite(tempFile, filename, writeErr, closeFn); err != nil {
+		reporter.Error("cfscan", "保存 %s 失败: %v", filename, err)
 		return
 	}
 	reporter.File("cfscan", filename, "[保存] 扫描结果 → %s", filename)

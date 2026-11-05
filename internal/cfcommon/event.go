@@ -5,6 +5,11 @@ import (
 	"sync"
 )
 
+const (
+	hubMaxHistory  = 10000
+	hubKeepHistory = 9000
+)
+
 type EventKind string
 
 const (
@@ -124,6 +129,11 @@ func (h *Hub) Reset() {
 		select {
 		case ch <- Event{Kind: KindReset, Stage: "pipeline", Message: "新任务开始"}:
 		default:
+			// Reset 是关键事件，丢不起：channel 满时断开订阅者，
+			// 浏览器 EventSource 自动重连，重连首帧就是 Reset + 新快照。
+			// 与 Publish 对关键事件的处理保持一致。
+			delete(h.subs, ch)
+			close(ch)
 		}
 	}
 	h.mu.Unlock()
@@ -133,8 +143,12 @@ func (h *Hub) Publish(e Event) {
 	h.mu.Lock()
 	if e.Kind != KindProgress {
 		h.log = append(h.log, e)
-		if len(h.log) > 4000 {
-			h.log = h.log[len(h.log)-3000:]
+		// 裁剪时插入一条显式提示，避免重连后用户以为「日志从头就这么多」。
+		if len(h.log) > hubMaxHistory {
+			trimmed := len(h.log) - hubKeepHistory
+			notice := Event{Stage: "pipeline", Kind: KindWarn,
+				Message: fmt.Sprintf("[日志] 已裁剪 %d 条较早记录，仅保留最近 %d 条", trimmed, hubKeepHistory)}
+			h.log = append([]Event{notice}, h.log[trimmed:]...)
 		}
 	}
 	for ch := range h.subs {

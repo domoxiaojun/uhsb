@@ -7,6 +7,10 @@ FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
 ARG TARGETOS
 ARG TARGETARCH
+# 先只拷依赖描述，让依赖下载独立成层：源码变动不会让这一层缓存失效。
+# 当前仓库无外部依赖；以后新增 go.sum 时在此补一行 `COPY go.sum ./`。
+COPY go.mod ./
+RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/cfweb ./cfweb \
@@ -37,16 +41,24 @@ RUN apt-get update \
  && /usr/local/bin/sing-box version
 
 FROM debian:bookworm-slim
+# 非 root 用户需要文件 capability 才能让 mtr 发 raw socket（compose 仍保留 NET_RAW）。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl mtr-tiny tzdata \
+ && apt-get install -y --no-install-recommends ca-certificates curl mtr-tiny tzdata libcap2-bin passwd \
  && rm -rf /var/lib/apt/lists/* \
- && mkdir -p /app /data /data/runs
+ && mtr_bin="$(command -v mtr)" && setcap cap_net_raw+ep "$mtr_bin" \
+ && groupadd --gid 10001 cftest \
+ && useradd --uid 10001 --gid cftest --no-create-home --shell /usr/sbin/nologin cftest \
+ && mkdir -p /app /data /data/runs \
+ && chown -R cftest:cftest /data
 COPY --from=build /out/ /usr/local/bin/
 COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY locations.json /app/locations.json
 COPY ips-v4.txt /app/ips-v4.txt
+# IPv6 模式下下载失败时也要能退回预置网段，否则离线容器完全跑不了 IPv6。
+COPY ips-v6.txt /app/ips-v6.txt
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+USER cftest
 WORKDIR /data
 ENV CFWEB_ADDR=0.0.0.0:8787 \
     CFWEB_OPEN=false \
@@ -55,6 +67,6 @@ ENV CFWEB_ADDR=0.0.0.0:8787 \
 EXPOSE 8787
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s \
-  CMD curl -fsS http://127.0.0.1:8787/api/status >/dev/null || exit 1
+  CMD curl -fsS http://127.0.0.1:8787/api/health >/dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["cfweb", "-addr", "0.0.0.0:8787", "-root", "/data", "-open=false"]

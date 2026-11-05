@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+
+	"cftest/internal/cfcommon"
 )
 
 type Node struct {
@@ -21,10 +23,10 @@ type Node struct {
 
 func (n Node) withDefaults() Node {
 	if n.Port <= 0 {
-		n.Port = 443
+		n.Port = cfcommon.DefaultVMessPort
 	}
 	if n.Path == "" {
-		n.Path = "/"
+		n.Path = cfcommon.DefaultVMessPath
 	}
 	if !strings.HasPrefix(n.Path, "/") {
 		n.Path = "/" + n.Path

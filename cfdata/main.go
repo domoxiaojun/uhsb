@@ -4,31 +4,40 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 
 	"cftest/internal/cfcommon"
 	"cftest/internal/cfdata"
 )
+
+// exitCode 让批处理调用方（CI / 脚本）能通过退出码判断失败，而不是只看日志文字。
+var exitCode int
 
 var (
 	hostHeader        = flag.String("host", cfdata.DefaultHost, "HTTP请求Host头(CF已禁止裸IP直连)")
 	flagMode          = flag.String("mode", "", "运行模式 1|2|3 (1=扫Colo+详测,2=筛Colo,3=按国家筛)")
 	flagColo          = flag.String("colo", "", "目标Colo 逗号分隔,如 HKG,NRT")
 	flagCountry       = flag.String("country", "", "目标国家代码 逗号分隔,如 HK,JP")
-	flagIPType        = flag.String("iptype", "4", "4 或 6")
-	flagPort          = flag.Int("port", 443, "详细测试端口")
-	flagDelay         = flag.Int("delay", 500, "详细测试延迟阈值 ms")
-	flagScanThreads   = flag.Int("scan-threads", 50, "扫描并发数")
-	flagTestThreads   = flag.Int("test-threads", 25, "测试并发数")
+	flagIPType        = flag.String("iptype", cfcommon.DefaultIPType, "4 或 6")
+	flagPort          = flag.Int("port", cfcommon.DefaultPort, "详细测试端口")
+	flagDelay         = flag.Int("delay", cfcommon.DefaultDelay, "详细测试延迟阈值 ms")
+	flagScanThreads   = flag.Int("scan-threads", cfcommon.DefaultScanThreads, "扫描并发数")
+	flagTestThreads   = flag.Int("test-threads", cfcommon.DefaultTestThreads, "测试并发数")
 	flagScanAlias     = flag.Int("scan", -1, "兼容旧版: 扫描阶段最大并发数")
 	flagTestAlias     = flag.Int("test", -1, "兼容旧版: 详细测试阶段最大并发数")
 	flagNumPerColo    = flag.Int("num-per-colo", 0, "每个 Colo 查找 IP 数 (0=不限)")
 	flagDetail        = flag.Bool("detail", true, "模式1/3 是否跑详细测试")
 	flagBatch         = flag.Bool("batch", false, "非交互模式,缺失参数用默认值")
-	flagIPv6PerSubnet = flag.Int("ipv6-per-subnet", 100, "IPv6 每个 /48 子网生成的 IP 数")
+	flagIPv6PerSubnet = flag.Int("ipv6-per-subnet", cfcommon.DefaultIPv6PerSubnet, "IPv6 每个 /48 子网生成的 IP 数")
 	flagVersion       = flag.Bool("version", false, "显示版本号")
 )
 
 func main() {
+	defer func() {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+	}()
 	flag.Parse()
 	if *flagVersion {
 		cfcommon.PrintVersionAndExit("cfdata")
@@ -58,10 +67,10 @@ func main() {
 			return
 		}
 
-		scanThreads := cfcommon.PromptInt("扫描并发数 (默认50): ", 50)
-		testThreads := cfcommon.PromptInt("测试并发数 (默认25): ", 25)
-		port := cfcommon.PromptInt("测试端口 (默认443): ", 443)
-		delay := cfcommon.PromptInt("延迟阈值ms (默认500): ", 500)
+		scanThreads := cfcommon.PromptInt(fmt.Sprintf("扫描并发数 (默认%d): ", cfcommon.DefaultScanThreads), cfcommon.DefaultScanThreads)
+		testThreads := cfcommon.PromptInt(fmt.Sprintf("测试并发数 (默认%d): ", cfcommon.DefaultTestThreads), cfcommon.DefaultTestThreads)
+		port := cfcommon.PromptInt(fmt.Sprintf("测试端口 (默认%d): ", cfcommon.DefaultPort), cfcommon.DefaultPort)
+		delay := cfcommon.PromptInt(fmt.Sprintf("延迟阈值ms (默认%d): ", cfcommon.DefaultDelay), cfcommon.DefaultDelay)
 
 		cfg := cfdata.Config{
 			Mode:        mode,
@@ -127,5 +136,6 @@ func runEngine(cfg cfdata.Config) {
 	defer stopSig()
 	if _, err := cfdata.Run(ctx, cfg, cfcommon.StdoutReporter()); err != nil {
 		fmt.Printf("[错误] %v\n", err)
+		exitCode = 1
 	}
 }

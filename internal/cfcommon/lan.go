@@ -7,8 +7,8 @@ import (
 )
 
 // AccessControl 决定某个客户端 IP 是否允许访问 WebUI。
-// 默认策略 "lan": 仅允许回环 + 私有网段 + 本机各网卡所在网段，
-// 这样局域网内的其它机器可以访问，公网地址会被拒绝。
+// 默认策略 "lan": 仅允许回环 + 私有网段 + 本机的局域网网卡网段，
+// 这样局域网内的其它机器可以访问，公网地址（含公网网卡同网段）会被拒绝。
 type AccessControl struct {
 	allowAny bool
 	nets     []*net.IPNet
@@ -106,11 +106,23 @@ func localInterfaceCIDRs() []*net.IPNet {
 		return out
 	}
 	for _, a := range addrs {
-		if ipnet, ok := a.(*net.IPNet); ok && ipnet != nil {
-			out = append(out, ipnet)
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet == nil || ipnet.IP == nil {
+			continue
 		}
+		// 只纳入本机局域网/回环网卡网段。VPS 上公网网卡的 CIDR 若被加入
+		// 白名单，等于把同网段公网机器也放进了无认证的 WebUI。
+		if !isLANIP(ipnet.IP) {
+			continue
+		}
+		out = append(out, ipnet)
 	}
 	return out
+}
+
+func isLANIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
 // Allowed 判断远端地址是否在白名单内。remoteAddr 形如 "192.168.1.5:1234"。
@@ -155,4 +167,10 @@ func (a *AccessControl) String() string {
 		return "nil"
 	}
 	return a.desc
+}
+
+// Insecure 报告当前是否完全放行来源。启动与 /api/status 用它给出显式告警，
+// 避免「any + 0.0.0.0」把无认证 WebUI 悄悄暴露到公网。
+func (a *AccessControl) Insecure() bool {
+	return a != nil && a.allowAny
 }

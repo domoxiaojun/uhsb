@@ -18,13 +18,21 @@ var coloRegex = regexp.MustCompile(`colo=([A-Z]+)`)
 // hostHeader 用于绕过 CF 对裸 IP 的拦截(如 "www.visa.cn")。
 // timeout 控制整个 HTTP 请求(含读响应)。
 func GetColo(conn net.Conn, ip, hostHeader string, timeout time.Duration) (string, error) {
+	return GetColoCtx(context.Background(), conn, ip, hostHeader, timeout)
+}
+
+// GetColoCtx 与 GetColo 相同，但 HTTP 请求绑定 ctx，任务取消时能立即中断读响应。
+func GetColoCtx(ctx context.Context, conn net.Conn, ip, hostHeader string, timeout time.Duration) (string, error) {
 	client := http.Client{
 		Transport: &http.Transport{
 			Dial: func(_, _ string) (net.Conn, error) { return conn, nil },
 		},
 		Timeout: timeout,
 	}
-	req, _ := http.NewRequest("GET", "http://"+net.JoinHostPort(ip, "80")+"/cdn-cgi/trace", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+net.JoinHostPort(ip, "80")+"/cdn-cgi/trace", nil)
+	if err != nil {
+		return "", err
+	}
 	req.Host = hostHeader
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Close = true
@@ -60,5 +68,5 @@ func DialAndGetColo(ctx context.Context, ip, hostHeader string, dialTimeout, htt
 		return "", err
 	}
 	defer conn.Close()
-	return GetColo(conn, ip, hostHeader, httpTimeout)
+	return GetColoCtx(ctx, conn, ip, hostHeader, httpTimeout)
 }

@@ -46,31 +46,31 @@ func (c Config) withDefaults() Config {
 		c.OutputPrefix = "cfconnectivity"
 	}
 	if c.PreferredColos == "" {
-		c.PreferredColos = "hkg,nrt,sin,tpe,icn"
+		c.PreferredColos = cfcommon.DefaultPreferredColos
 	}
 	if c.Workers <= 0 {
-		c.Workers = 20
+		c.Workers = cfcommon.DefaultConnWorkers
 	}
 	if c.TestRounds <= 0 {
-		c.TestRounds = 3
+		c.TestRounds = cfcommon.DefaultConnRounds
 	}
 	if c.ConnectTimeout <= 0 {
-		c.ConnectTimeout = 3
+		c.ConnectTimeout = cfcommon.DefaultConnTimeout
 	}
 	if c.DownloadSize <= 0 {
-		c.DownloadSize = 200
+		c.DownloadSize = cfcommon.DefaultConnSize
 	}
 	if c.FetchRetries < 0 {
-		c.FetchRetries = 1
+		c.FetchRetries = cfcommon.DefaultColoRetries
 	}
 	if c.MaxLatency <= 0 {
-		c.MaxLatency = 200
+		c.MaxLatency = cfcommon.DefaultConnLatency
 	}
 	if c.MaxPacketLoss < 0 {
-		c.MaxPacketLoss = 10
+		c.MaxPacketLoss = cfcommon.DefaultConnLoss
 	}
 	if c.MinSpeed < 0 {
-		c.MinSpeed = 100
+		c.MinSpeed = cfcommon.DefaultConnSpeed
 	}
 	return c
 }
@@ -109,7 +109,7 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 		}
 	}
 
-	locMap, err := cfcommon.LoadLocations()
+	locMap, err := cfcommon.LoadLocationsCtx(ctx)
 	if err != nil {
 		reporter.Warn("cfconnectivity", "加载位置信息失败: %v", err)
 	}
@@ -416,6 +416,7 @@ func saveResultsCSV(results []ConnectivityResult, filename string, reporter cfco
 	tempFile := cfcommon.TempWritePath(filename)
 	w, _, closeFn, err := cfcommon.NewCSVWriter(tempFile)
 	if err != nil {
+		reporter.Error("cfconnectivity", "保存 %s 失败: %v", filename, err)
 		return
 	}
 	writeErr := w.Write([]string{"IP地址", "平均延迟ms", "最小延迟ms", "最大延迟ms", "抖动ms", "丢包率%", "成功率%", "下载速度Mbps", "数据中心", "位置", "国家", "评分", "测试时间"})
@@ -437,7 +438,8 @@ func saveResultsCSV(results []ConnectivityResult, filename string, reporter cfco
 			r.TestTime.Format("2006-01-02 15:04:05"),
 		})
 	}
-	if writeErr != nil || closeFn() != nil || cfcommon.ReplaceFileFromTemp(tempFile, filename) != nil {
+	if err := cfcommon.FinishCSVWrite(tempFile, filename, writeErr, closeFn); err != nil {
+		reporter.Error("cfconnectivity", "保存 %s 失败: %v", filename, err)
 		return
 	}
 	reporter.File("cfconnectivity", filename, "[保存] 详细结果 → %s", filename)

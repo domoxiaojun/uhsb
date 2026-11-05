@@ -21,10 +21,12 @@ import (
 )
 
 const (
-	DefaultSpeedHost = "cftest.domob.org"
+	DefaultSpeedHost = cfcommon.DefaultSpeedHost
 	TraceHost        = "speed.cloudflare.com"
-	DefaultHost      = "www.visa.cn"
+	DefaultHost      = cfcommon.DefaultHost
 	HistoryHeaderLen = 11
+	// 每个候选 IP 都要拉起一个 sing-box 实例，并发过高会把本机端口/内存吃满。
+	singBoxMaxWorkers = 6
 )
 
 type Config struct {
@@ -86,49 +88,49 @@ func (c Config) withDefaults() Config {
 		c.HostHeader = DefaultHost
 	}
 	if c.Workers <= 0 {
-		c.Workers = 20
+		c.Workers = cfcommon.DefaultWorkers
 	}
 	if c.TestRounds <= 0 {
-		c.TestRounds = 3
+		c.TestRounds = cfcommon.DefaultTestRounds
 	}
 	if c.ConnectTimeout <= 0 {
-		c.ConnectTimeout = 3
+		c.ConnectTimeout = cfcommon.DefaultConnectTimeout
 	}
 	if c.MaxLatency <= 0 {
-		c.MaxLatency = 200
+		c.MaxLatency = cfcommon.DefaultMaxLatency
 	}
 	if c.Port <= 0 {
-		c.Port = 443
+		c.Port = cfcommon.DefaultPort
 	}
 	if c.DownloadSizeMB <= 0 {
-		c.DownloadSizeMB = 200
+		c.DownloadSizeMB = cfcommon.DefaultSpeedSize
 	}
 	if c.ColoRetries < 0 {
-		c.ColoRetries = 1
+		c.ColoRetries = cfcommon.DefaultColoRetries
 	}
 	if c.SingleSpeedTimeoutSec <= 0 {
-		c.SingleSpeedTimeoutSec = 30
+		c.SingleSpeedTimeoutSec = cfcommon.DefaultSingleSpeedTimeout
 	}
 	if c.MaxPacketLoss < 0 {
-		c.MaxPacketLoss = 10
+		c.MaxPacketLoss = cfcommon.DefaultMaxPacketLoss
 	}
 	if c.MinSpeedMbps < 0 {
-		c.MinSpeedMbps = 50
+		c.MinSpeedMbps = cfcommon.DefaultMinSpeedMbps
 	}
 	if c.JitterBaseline == 0 {
-		c.JitterBaseline = 100
+		c.JitterBaseline = cfcommon.DefaultJitterBaseline
 	}
 	if c.EarlyMinSpeed == 0 {
-		c.EarlyMinSpeed = 10
+		c.EarlyMinSpeed = cfcommon.DefaultEarlyMinSpeed
 	}
 	if c.EarlyCheckDur == 0 {
-		c.EarlyCheckDur = 3 * time.Second
+		c.EarlyCheckDur = cfcommon.DefaultEarlyCheckDur
 	}
 	if c.VMessPort <= 0 {
-		c.VMessPort = 443
+		c.VMessPort = cfcommon.DefaultVMessPort
 	}
 	if c.VMessPath == "" {
-		c.VMessPath = "/"
+		c.VMessPath = cfcommon.DefaultVMessPath
 	}
 	if c.VMessSNI == "" {
 		c.VMessSNI = c.VMessHost
@@ -156,7 +158,20 @@ type TestResult struct {
 	DownloadMbps  float64
 	Score         float64
 	TestTime      time.Time
-	VMessURL      string
+	// VMessURL 含明文节点凭据，禁止被任何 JSON 序列化路径带出（SSE Extra、
+	// 报告、调试输出）。只有落盘到 *_vmess.txt 时才允许使用。
+	VMessURL string `json:"-"`
+}
+
+// resultEvent 是推送到 SSE 的脱敏结果摘要。刻意逐个字段声明，避免把
+// TestResult 整包塞进 Extra 导致以后新增字段时又把凭据带出去。
+type resultEvent struct {
+	IP           string  `json:"ip"`
+	DataCenter   string  `json:"colo"`
+	Location     string  `json:"location"`
+	AvgLatencyMs int64   `json:"avg_latency_ms"`
+	DownloadMbps float64 `json:"download_mbps"`
+	Score        float64 `json:"score"`
 }
 
 type Result struct {
@@ -232,8 +247,12 @@ type session struct {
 }
 
 func newSession(cfg Config, reporter cfcommon.Reporter) (*session, error) {
+	return newSessionCtx(context.Background(), cfg, reporter)
+}
+
+func newSessionCtx(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*session, error) {
 	s := &session{cfg: cfg, reporter: reporter}
-	if m, err := cfcommon.LoadLocations(); err != nil {
+	if m, err := cfcommon.LoadLocationsCtx(ctx); err != nil {
 		reporter.Warn("cfspeed", "%v", err)
 	} else {
 		s.locMap = m
@@ -265,9 +284,9 @@ func newSession(cfg Config, reporter cfcommon.Reporter) (*session, error) {
 		s.box = mgr
 		reporter.Log("cfspeed", "[信息] 测速走 sing-box VMess+WS (%s) host=%s path=%s tls=%v",
 			mgr.Binary(), cfg.VMessHost, cfg.VMessPath, cfg.VMessTLS)
-		if s.cfg.Workers > 6 {
-			reporter.Warn("cfspeed", "sing-box 测速并发从 %d 降到 6，避免本机拉起过多内核", s.cfg.Workers)
-			s.cfg.Workers = 6
+		if s.cfg.Workers > singBoxMaxWorkers {
+			reporter.Warn("cfspeed", "sing-box 测速并发从 %d 降到 %d，避免本机拉起过多内核", s.cfg.Workers, singBoxMaxWorkers)
+			s.cfg.Workers = singBoxMaxWorkers
 		}
 	}
 	return s, nil
@@ -275,7 +294,14 @@ func newSession(cfg Config, reporter cfcommon.Reporter) (*session, error) {
 
 func (s *session) close() {
 	if s.history != nil {
-		_ = s.history.Close()
+		if err := s.history.Close(); err != nil {
+			s.reporter.Warn("cfspeed", "实时结果保存关闭失败: %v", err)
+		}
+	}
+	// 兜底取消所有 sing-box 子进程：即使某个 Instance.Close 因异常没跑到，
+	// 任务结束时也不会留下孤儿内核。
+	if s.box != nil {
+		s.box.Close()
 	}
 }
 
@@ -459,7 +485,11 @@ func (s *session) measureSpeed(ctx context.Context, ip string, timeout time.Dura
 		if err != nil {
 			return 0, err
 		}
-		defer inst.Close()
+		defer func() {
+			if closeErr := inst.Close(); closeErr != nil {
+				s.reporter.Warn("cfspeed", "关闭 sing-box 实例失败: %v", closeErr)
+			}
+		}()
 		speed, _, err := cfcommon.MeasureDownloadSpeedViaProxy(speedCtx, inst.ProxyURL, target,
 			timeout, 0, s.cfg.EarlyCheckDur, s.cfg.EarlyMinSpeed, 256*1024)
 		return speed, err
@@ -499,7 +529,7 @@ func (s *session) testBatchCandidate(ctx context.Context, ip string) (TestResult
 }
 
 func runBatch(ctx context.Context, cfg Config, ips []string, reporter cfcommon.Reporter) (*Result, error) {
-	s, err := newSession(cfg, reporter)
+	s, err := newSessionCtx(ctx, cfg, reporter)
 	if err != nil {
 		return nil, err
 	}
@@ -545,7 +575,14 @@ launch:
 				Kind:    cfcommon.KindResult,
 				Message: fmt.Sprintf("%s → %.0fms %.1fMbps %s", ip, float64(result.AvgLatency.Milliseconds()), result.DownloadMbps, result.DataCenter),
 				IP:      ip,
-				Extra:   result,
+				Extra: resultEvent{
+					IP:           result.IP,
+					DataCenter:   result.DataCenter,
+					Location:     result.Location,
+					AvgLatencyMs: result.AvgLatency.Milliseconds(),
+					DownloadMbps: result.DownloadMbps,
+					Score:        result.Score,
+				},
 			})
 			progress.Hit(fmt.Sprintf("%s → %.0fms %.1fMbps %s", ip, float64(result.AvgLatency.Milliseconds()), result.DownloadMbps, result.DataCenter))
 		}(ip)
@@ -553,7 +590,9 @@ launch:
 	wg.Wait()
 	progress.Stop()
 	if saver != nil {
-		_ = saver.Close()
+		if err := saver.Close(); err != nil {
+			reporter.Warn("cfspeed", "实时结果保存关闭失败: %v", err)
+		}
 	}
 
 	sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
@@ -588,7 +627,7 @@ type latencyProbe struct {
 }
 
 func runOptimize(ctx context.Context, cfg Config, ips []string, reporter cfcommon.Reporter) (*Result, error) {
-	s, err := newSession(cfg, reporter)
+	s, err := newSessionCtx(ctx, cfg, reporter)
 	if err != nil {
 		return nil, err
 	}
@@ -668,7 +707,7 @@ launch:
 }
 
 func runSingle(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, error) {
-	s, err := newSession(cfg, reporter)
+	s, err := newSessionCtx(ctx, cfg, reporter)
 	if err != nil {
 		return nil, err
 	}
@@ -854,6 +893,7 @@ func saveAllCSV(results []TestResult, filename string, reporter cfcommon.Reporte
 	tempFile := cfcommon.TempWritePath(filename)
 	w, _, closeFn, err := cfcommon.NewCSVWriter(tempFile)
 	if err != nil {
+		reporter.Error("cfspeed", "保存 %s 失败: %v", filename, err)
 		return
 	}
 	writeErr := w.Write([]string{"IP", "Colo", "位置", "国家", "平均延迟ms", "最小延迟ms", "最大延迟ms", "丢包率%", "下载速度Mbps", "评分"})
@@ -870,7 +910,8 @@ func saveAllCSV(results []TestResult, filename string, reporter cfcommon.Reporte
 			})
 		}
 	}
-	if writeErr != nil || closeFn() != nil || cfcommon.ReplaceFileFromTemp(tempFile, filename) != nil {
+	if err := cfcommon.FinishCSVWrite(tempFile, filename, writeErr, closeFn); err != nil {
+		reporter.Error("cfspeed", "保存 %s 失败: %v", filename, err)
 		return
 	}
 	reporter.File("cfspeed", filename, "[保存] 全部结果 → %s (%d条)", filename, len(results))
@@ -904,8 +945,11 @@ func saveVMessExports(cfg Config, nodes []TestResult, out *Result, reporter cfco
 		return
 	}
 	out.VMessFile = cfg.OutputPrefix + "_vmess.txt"
-	if err := cfcommon.WriteLinesAtomic(out.VMessFile, links); err == nil {
-		reporter.File("cfspeed", out.VMessFile, "[保存] VMess 节点 → %s (%d条)", out.VMessFile, len(links))
+	if err := cfcommon.WriteLinesAtomicMode(out.VMessFile, links, 0600); err == nil {
+		reporter.File("cfspeed", out.VMessFile, "[保存] VMess 节点 → %s (%d条，权限 0600)", out.VMessFile, len(links))
+	} else {
+		reporter.Error("cfspeed", "保存 VMess 节点失败: %v", err)
+		out.VMessFile = ""
 	}
 	if len(clientOutbounds) > 0 {
 		client := map[string]any{
@@ -918,8 +962,11 @@ func saveVMessExports(cfg Config, nodes []TestResult, out *Result, reporter cfco
 		raw, err := json.MarshalIndent(client, "", "  ")
 		if err == nil {
 			out.ClientJSON = cfg.OutputPrefix + "_singbox.json"
-			if writeErr := os.WriteFile(out.ClientJSON, raw, 0644); writeErr == nil {
-				reporter.File("cfspeed", out.ClientJSON, "[保存] sing-box 客户端配置 → %s", out.ClientJSON)
+			if writeErr := cfcommon.WriteLinesAtomicMode(out.ClientJSON, []string{string(raw)}, 0600); writeErr == nil {
+				reporter.File("cfspeed", out.ClientJSON, "[保存] sing-box 客户端配置 → %s（权限 0600）", out.ClientJSON)
+			} else {
+				reporter.Error("cfspeed", "保存 sing-box 客户端配置失败: %v", writeErr)
+				out.ClientJSON = ""
 			}
 		}
 	}
@@ -969,6 +1016,7 @@ func showDetailedResult(result TestResult, reporter cfcommon.Reporter) {
 	reporter.Log("cfspeed", "测试 IP: %s | 延迟: %s | 带宽: %.2f Mbps | Colo: %s | 城市: %s",
 		result.IP, result.AvgLatency.Round(time.Millisecond), result.DownloadMbps, result.DataCenter, result.City)
 	if result.VMessURL != "" {
-		reporter.Log("cfspeed", "节点: %s", result.VMessURL)
+		// 绝不把 vmess:// 链接打进日志：base64 可逆，等同于明文泄露 UUID。
+		reporter.Log("cfspeed", "VMess 节点已生成（凭据仅写入 *_vmess.txt / *_singbox.json，日志不展示）")
 	}
 }

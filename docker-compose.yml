@@ -6,8 +6,12 @@ services:
       dockerfile: Dockerfile
     container_name: cftest
     restart: unless-stopped
+    # 与镜像内 cftest 用户一致；Linux 上若 ./data 属主不同，在 .env 里覆盖。
+    user: "${CFWEB_UID:-10001}:${CFWEB_GID:-10001}"
     ports:
-      - "8787:8787"
+      # 默认只监听宿主机回环，避免把无认证的 WebUI 直接暴露到公网。
+      # 需要从局域网访问时，在 .env 里设 CFWEB_BIND_IP=0.0.0.0（并收紧 CFWEB_ALLOW）。
+      - "${CFWEB_BIND_IP:-127.0.0.1}:${CFWEB_PORT:-8787}:8787"
     env_file:
       - path: .env
         required: false
@@ -23,8 +27,16 @@ services:
       - ./locations.json:/app/locations.json:ro
     cap_add:
       - NET_RAW
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/api/status"]
+      # /api/health 不触发 mtr / sing-box 探测，避免 5s 超时误判 unhealthy
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
+      # compose 的 healthcheck 会覆盖镜像 HEALTHCHECK，需显式保留启动宽限
+      start_period: 15s

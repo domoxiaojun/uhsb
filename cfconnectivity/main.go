@@ -4,26 +4,30 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 
 	"cftest/internal/cfcommon"
 	"cftest/internal/cfconnectivity"
 )
 
+// exitCode 让批处理调用方（CI / 脚本）能通过退出码判断失败。
+var exitCode int
+
 var (
 	inputFile      = flag.String("input", "ip.txt", "输入IP文件路径(支持IPv4/IPv6)")
-	workers        = flag.Int("workers", 20, "并发测试数量")
-	testRounds     = flag.Int("rounds", 3, "每个IP的测试轮数")
-	connectTimeout = flag.Int("timeout", 3, "连接超时时间(秒)")
-	maxPacketLoss  = flag.Float64("loss", 10.0, "最大允许丢包率(%)")
-	minSpeed       = flag.Float64("speed", 100.0, "最低速度要求(Mbps)")
-	maxLatency     = flag.Int("latency", 200, "最大延迟要求(ms)")
+	workers        = flag.Int("workers", cfcommon.DefaultConnWorkers, "并发测试数量")
+	testRounds     = flag.Int("rounds", cfcommon.DefaultConnRounds, "每个IP的测试轮数")
+	connectTimeout = flag.Int("timeout", cfcommon.DefaultConnTimeout, "连接超时时间(秒)")
+	maxPacketLoss  = flag.Float64("loss", cfcommon.DefaultConnLoss, "最大允许丢包率(%)")
+	minSpeed       = flag.Float64("speed", cfcommon.DefaultConnSpeed, "最低速度要求(Mbps)")
+	maxLatency     = flag.Int("latency", cfcommon.DefaultConnLatency, "最大延迟要求(ms)")
 	outputPrefix   = flag.String("output", "cfconnectivity", "输出文件前缀")
 	verbose        = flag.Bool("verbose", false, "详细输出")
-	preferredColos = flag.String("colos", "hkg,nrt,sin,tpe,icn", "优先的Colo代码(逗号分隔)")
+	preferredColos = flag.String("colos", cfcommon.DefaultPreferredColos, "优先的Colo代码(逗号分隔)")
 	coloFilter     = flag.String("colo-filter", "", "只测试指定Colo的IP(逗号分隔),留空测试全部")
-	downloadSize   = flag.Int("size", 200, "下载测试文件大小(MB)")
+	downloadSize   = flag.Int("size", cfcommon.DefaultConnSize, "下载测试文件大小(MB)")
 	nonInteractive = flag.Bool("noninteractive", false, "非交互模式")
-	fetchRetries   = flag.Int("colo-retries", 1, "trace 获取失败时的重试次数")
+	fetchRetries   = flag.Int("colo-retries", cfcommon.DefaultColoRetries, "trace 获取失败时的重试次数")
 
 	inputFileShort      = flag.String("f", "", "输入IP文件路径(-input 别名)")
 	workersShort        = flag.Int("w", -1, "并发数(-workers 别名)")
@@ -36,6 +40,11 @@ var (
 )
 
 func main() {
+	defer func() {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+	}()
 	flag.Parse()
 	if *showVersion {
 		cfcommon.PrintVersionAndExit("cfconnectivity")
@@ -78,6 +87,7 @@ func main() {
 	}, cfcommon.StdoutReporter())
 	if err != nil {
 		fmt.Printf("[错误] %v\n", err)
+		exitCode = 1
 	}
 }
 

@@ -34,7 +34,7 @@ func runModeScanColo(ctx context.Context, cfg Config, reporter cfcommon.Reporter
 	}
 	reporter.Log("cfdata", "目标Colo: %v", targetColos)
 
-	subnets, locMap, err := loadResources(cfg, reporter)
+	subnets, locMap, err := loadResources(ctx, cfg, reporter)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,7 @@ func runModeFilterColo(ctx context.Context, cfg Config, reporter cfcommon.Report
 		coloInput = "hkg,nrt,sin,tpa"
 	}
 	targetColos := ParseColoList(coloInput)
-	subnets, locMap, err := loadResources(cfg, reporter)
+	subnets, locMap, err := loadResources(ctx, cfg, reporter)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func runModeFilterCountry(ctx context.Context, cfg Config, reporter cfcommon.Rep
 		return nil, fmt.Errorf("输入不能为空")
 	}
 	targetCountries := ParseColoList(cfg.Country)
-	subnets, locMap, err := loadResources(cfg, reporter)
+	subnets, locMap, err := loadResources(ctx, cfg, reporter)
 	if err != nil {
 		return nil, err
 	}

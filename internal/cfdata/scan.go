@@ -16,7 +16,7 @@ import (
 	"cftest/internal/cfcommon"
 )
 
-func loadResources(cfg Config, reporter cfcommon.Reporter) ([]string, map[string]cfcommon.Location, error) {
+func loadResources(ctx context.Context, cfg Config, reporter cfcommon.Reporter) ([]string, map[string]cfcommon.Location, error) {
 	var ipURL, name string
 	if cfg.IPType == "6" {
 		ipURL, name = cfg.IPv6URL, "ips-v6.txt"
@@ -25,13 +25,13 @@ func loadResources(cfg Config, reporter cfcommon.Reporter) ([]string, map[string
 	}
 
 	cachePath := cfcommon.WorkPath(cfg.CacheDir, name)
-	subnets, source, err := loadSubnetList(cachePath, ipURL, cfg.MaxAge)
+	subnets, source, err := loadSubnetListCtx(ctx, cachePath, ipURL, cfg.MaxAge)
 	if err != nil {
 		return nil, nil, fmt.Errorf("加载IP段失败: %v", err)
 	}
 	reporter.Log("cfdata", "[信息] 已加载 %d 个子网 (来源: %s)", len(subnets), source)
 
-	locMap, err := cfcommon.LoadLocations()
+	locMap, err := cfcommon.LoadLocationsCtx(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("加载位置数据失败: %v", err)
 	}
@@ -39,9 +39,15 @@ func loadResources(cfg Config, reporter cfcommon.Reporter) ([]string, map[string
 	return subnets, locMap, nil
 }
 
-// loadSubnetList 读取网段列表，优先用未过期的本地缓存；缓存过期或缺失时
-// 重新下载并刷新缓存；下载失败则退回旧缓存或镜像预置文件。
+// loadSubnetList 是测试用的无 ctx 包装；产品路径请用 loadSubnetListCtx。
 func loadSubnetList(cachePath, url string, maxAge time.Duration) ([]string, string, error) {
+	return loadSubnetListCtx(context.Background(), cachePath, url, maxAge)
+}
+
+// loadSubnetListCtx 读取网段列表，优先用未过期的本地缓存；缓存过期或缺失时
+// 重新下载并刷新缓存；下载失败则退回旧缓存或镜像预置文件。ctx 用于让
+// 「停止任务」能中断正在进行的下载。
+func loadSubnetListCtx(ctx context.Context, cachePath, url string, maxAge time.Duration) ([]string, string, error) {
 	cached, cacheErr := os.ReadFile(cachePath)
 	if cacheErr == nil {
 		if lines := parseLines(string(cached)); len(lines) > 0 && validateSubnetLines(lines) == nil {
@@ -56,7 +62,7 @@ func loadSubnetList(cachePath, url string, maxAge time.Duration) ([]string, stri
 		}
 	}
 
-	if lines, err := loadOrDownload(cachePath, url); err == nil {
+	if lines, err := loadOrDownloadCtx(ctx, cachePath, url); err == nil {
 		return lines, url, nil
 	} else if len(cached) > 0 {
 		if lines := parseLines(string(cached)); len(lines) > 0 {
@@ -94,10 +100,19 @@ func findSeed(name string) string {
 	return ""
 }
 
-// loadOrDownload 下载 IP 段列表，校验通过后写入 localFile 作为缓存。
+// loadOrDownload 是测试用的无 ctx 包装；产品路径请用 loadOrDownloadCtx。
 func loadOrDownload(localFile, url string) ([]string, error) {
+	return loadOrDownloadCtx(context.Background(), localFile, url)
+}
+
+// loadOrDownloadCtx 下载 IP 段列表，校验通过后写入 localFile 作为缓存。
+func loadOrDownloadCtx(ctx context.Context, localFile, url string) ([]string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

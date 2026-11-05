@@ -3,6 +3,7 @@ package singbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -48,6 +49,7 @@ func (i *Instance) Close() error {
 	if i == nil {
 		return nil
 	}
+	var errs []error
 	if i.cancel != nil {
 		i.cancel()
 	}
@@ -55,14 +57,25 @@ func (i *Instance) Close() error {
 		select {
 		case <-i.done:
 		default:
-			_ = i.cmd.Process.Kill()
-			<-i.done
+			if err := i.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				errs = append(errs, fmt.Errorf("结束 sing-box 进程失败: %w", err))
+			}
+			// Kill 失败或 cmd.Wait 卡住时不能无限等，否则 worker 的 wg.Wait()
+			// 会把整个 pipeline 永久挂死，且没有任何 ctx 能解开。
+			select {
+			case <-i.done:
+			case <-time.After(3 * time.Second):
+				errs = append(errs, fmt.Errorf("等待 sing-box 退出超时（3s）"))
+			}
 		}
 	}
 	if i.ConfigPath != "" {
-		_ = os.Remove(i.ConfigPath)
+		if err := os.Remove(i.ConfigPath); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("清理含凭据的临时配置失败: %w", err))
+		}
+		i.ConfigPath = ""
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // Stderr 返回 sing-box 最近输出的诊断信息（启动失败时用于报错）。
@@ -76,6 +89,19 @@ func (i *Instance) Stderr() string {
 type Manager struct {
 	cfg    Config
 	binary string
+
+	// procCtx 是「本次测速任务」级别的 ctx，Cancel 后所有 sing-box 子进程一起退出。
+	// 子进程不直接绑定单次测速的 ctx（那会因测速超时误杀内核），
+	// 但必须有任务级兜底，避免异常退出留下孤儿进程。
+	procCtx    context.Context
+	procCancel context.CancelFunc
+}
+
+// Close 取消本次任务拉起的所有 sing-box 进程，由 session.close() 调用。
+func (m *Manager) Close() {
+	if m != nil && m.procCancel != nil {
+		m.procCancel()
+	}
 }
 
 func Available(explicit string) (string, bool) {
@@ -100,8 +126,27 @@ func NewManager(cfg Config) (*Manager, error) {
 		if err := os.MkdirAll(cfg.WorkDir, 0755); err != nil {
 			return nil, err
 		}
+		cleanStaleConfigs(cfg.WorkDir)
 	}
-	return &Manager{cfg: cfg, binary: bin}, nil
+	procCtx, procCancel := context.WithCancel(context.Background())
+	return &Manager{cfg: cfg, binary: bin, procCtx: procCtx, procCancel: procCancel}, nil
+}
+
+// cleanStaleConfigs 清掉上次被 SIGKILL/OOM 留下的临时配置（内含明文 UUID）。
+func cleanStaleConfigs(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := strings.ToLower(e.Name())
+		if strings.HasPrefix(n, "singbox-") && strings.HasSuffix(n, ".json") {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 func (m *Manager) Binary() string { return m.binary }
@@ -140,12 +185,24 @@ func (m *Manager) startOnce(ctx context.Context, node Node) (*Instance, error) {
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	path := filepath.Join(dir, fmt.Sprintf("singbox-%d-%d.json", os.Getpid(), port))
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		return nil, err
+	// CreateTemp 生成唯一文件名（0600）：freePort 存在 TOCTOU 窗口，
+	// 固定 pid+port 命名会让并发 Start 互相覆盖配置、串用节点凭据。
+	f, err := os.CreateTemp(dir, "singbox-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("创建临时配置失败: %w", err)
+	}
+	path := f.Name()
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("写入临时配置失败: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("关闭临时配置失败: %w", err)
 	}
 
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithCancel(m.procCtx)
 	cmd := exec.CommandContext(runCtx, m.binary, "run", "-c", path)
 	stderr := &tailBuffer{max: 4096}
 	cmd.Stdout = stderr

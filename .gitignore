@@ -18,7 +18,8 @@ vendor/
 /runs/
 *.tmp
 *.bak
-ips-v6.txt
+# 仓库根目录的 ips-v6.txt 是镜像内置的 IPv6 种子，必须入库；
+# 只忽略运行时生成在 cfdata/ 下的副本。
 cfdata/ips-v4.txt
 cfdata/ips-v6.txt
 speed_test_results.csv

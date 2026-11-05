@@ -27,6 +27,7 @@ type Config struct {
 	Delay              int
 	NumPerColo         int
 	HighQualityHops    int
+	ScanKeywords       string
 	Detail             bool
 	SkipScan           bool
 	RunConnect         bool
@@ -62,77 +63,81 @@ type Config struct {
 
 func (c Config) withDefaults() Config {
 	if c.DataMode == "" {
-		c.DataMode = "1"
+		c.DataMode = cfcommon.DefaultDataMode
 	}
 	if c.IPType == "" {
-		c.IPType = "4"
+		c.IPType = cfcommon.DefaultIPType
 	}
 	if c.ScanThreads <= 0 {
-		c.ScanThreads = 50
+		c.ScanThreads = cfcommon.DefaultScanThreads
 	}
 	if c.TestThreads <= 0 {
-		c.TestThreads = 25
+		c.TestThreads = cfcommon.DefaultTestThreads
 	}
 	if c.Port <= 0 {
-		c.Port = 443
+		c.Port = cfcommon.DefaultPort
 	}
 	if c.Delay <= 0 {
-		c.Delay = 500
+		c.Delay = cfcommon.DefaultDelay
 	}
 	if c.SpeedMode == "" {
-		c.SpeedMode = "batch"
+		c.SpeedMode = cfcommon.DefaultSpeedMode
 	}
 	if c.SpeedProtocol == "" {
-		c.SpeedProtocol = "http"
+		c.SpeedProtocol = cfcommon.DefaultSpeedProtocol
 	}
 	if c.SpeedSize <= 0 {
-		c.SpeedSize = 50
+		c.SpeedSize = cfcommon.DefaultSpeedSize
 	}
 	if c.SpeedWorkers <= 0 {
-		c.SpeedWorkers = 20
+		c.SpeedWorkers = cfcommon.DefaultWorkers
 	}
 	if c.SpeedRounds <= 0 {
-		c.SpeedRounds = 3
+		c.SpeedRounds = cfcommon.DefaultTestRounds
 	}
 	if c.SpeedTimeout <= 0 {
-		c.SpeedTimeout = 3
+		c.SpeedTimeout = cfcommon.DefaultConnectTimeout
 	}
-	if c.SpeedLoss == 0 {
-		c.SpeedLoss = 10
+	// 负数为非法值；0 是调用方显式传入的「关闭该门槛」，必须原样透传给引擎。
+	if c.SpeedLoss < 0 {
+		c.SpeedLoss = cfcommon.DefaultMaxPacketLoss
 	}
-	if c.SpeedMinMbps == 0 {
-		c.SpeedMinMbps = 50
+	if c.SpeedMinMbps < 0 {
+		c.SpeedMinMbps = cfcommon.DefaultMinSpeedMbps
 	}
 	if c.SpeedLatency <= 0 {
-		c.SpeedLatency = 200
+		c.SpeedLatency = cfcommon.DefaultMaxLatency
 	}
 	if c.HighQualityHops == 0 {
 		// 0 = 用默认阈值；负数 = 关闭"高跳数视为优质"的启发式
-		c.HighQualityHops = 16
+		c.HighQualityHops = cfcommon.DefaultHighQualityHops
+	}
+	if c.ScanKeywords == "" {
+		c.ScanKeywords = cfcommon.DefaultKeywords
 	}
 	if c.ConnWorkers <= 0 {
-		c.ConnWorkers = 20
+		c.ConnWorkers = cfcommon.DefaultConnWorkers
 	}
 	if c.ConnRounds <= 0 {
-		c.ConnRounds = 3
+		c.ConnRounds = cfcommon.DefaultConnRounds
 	}
 	if c.ConnTimeout <= 0 {
-		c.ConnTimeout = 3
+		c.ConnTimeout = cfcommon.DefaultConnTimeout
 	}
-	if c.ConnLoss == 0 {
-		c.ConnLoss = 10
+	if c.ConnLoss < 0 {
+		c.ConnLoss = cfcommon.DefaultConnLoss
 	}
-	if c.ConnSpeed == 0 {
-		c.ConnSpeed = 100
+	if c.ConnSpeed < 0 {
+		c.ConnSpeed = cfcommon.DefaultConnSpeed
 	}
 	if c.ConnLatency <= 0 {
-		c.ConnLatency = 200
+		c.ConnLatency = cfcommon.DefaultConnLatency
 	}
 	if c.ConnSize <= 0 {
-		c.ConnSize = 200
+		c.ConnSize = cfcommon.DefaultConnSize
 	}
 	if c.HostHeader == "" {
-		c.HostHeader = "www.visa.cn"
+		c.HostHeader = cfcommon.DefaultHost
 	}
 	if c.RootDir == "" {
 		c.RootDir, _ = os.Getwd()
@@ -141,6 +146,15 @@ func (c Config) withDefaults() Config {
 		c.RunsDir = filepath.Join(c.RootDir, "runs")
 	}
 	return c
+}
+
+// qualityFromScan 把 cfscan 结果转成测速输入。
+// 命中 0 时必须报错停止，绝不能悄悄退回 cfdata 的全量 IP 列表去测速。
+func qualityFromScan(res *cfscan.Result) (string, error) {
+	if res == nil || res.QualityFile == "" || len(res.Hits) == 0 {
+		return "", fmt.Errorf("cfscan 未产出质量 IP（命中 0），已停止测速，避免改测 cfdata 全量")
+	}
+	return res.QualityFile, nil
 }
 
 type Result struct {
@@ -161,9 +175,19 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 	if err := os.MkdirAll(cfg.RunsDir, 0755); err != nil {
 		return nil, err
 	}
-	runDir := filepath.Join(cfg.RunsDir, time.Now().Format("20060102_150405"))
-	if err := os.MkdirAll(runDir, 0755); err != nil {
-		return nil, err
+	// 时间戳只精确到秒，同一秒内的两次运行（或手工塞了同名目录）会互相覆盖产物。
+	// 用 os.Mkdir 的原子性挑一个不存在的目录名。
+	base := time.Now().Format("20060102_150405")
+	runDir := filepath.Join(cfg.RunsDir, base)
+	for i := 2; ; i++ {
+		err := os.Mkdir(runDir, 0755)
+		if err == nil {
+			break
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+		runDir = filepath.Join(cfg.RunsDir, fmt.Sprintf("%s-%d", base, i))
 	}
 	tag := buildTag(cfg)
 	out := &Result{RunDir: runDir, Tag: tag}
@@ -190,6 +214,11 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 	out.Data = dataRes
 	ipsFile := firstNonEmpty(dataRes.ZeroLossIPFile, dataRes.IPFile)
 	if ipsFile == "" {
+		// 用户点「停止」时 cfdata 可能只返回空结果而不带 error，
+		// 此时优先报「已取消」，不要误报成「没有产出 IP 文件」。
+		if ctx.Err() != nil {
+			return out, fmt.Errorf("任务已取消: %w", ctx.Err())
+		}
 		return out, fmt.Errorf("cfdata 没有产出 IP 文件")
 	}
 	out.IPsFile = ipsFile
@@ -197,34 +226,37 @@ func Run(ctx context.Context, cfg Config, reporter cfcommon.Reporter) (*Result, 
 		return out, ctx.Err()
 	}
 
-	skipScan := cfg.SkipScan || !cfscan.MTRAvailable()
+	// 只探测一次，并把结果同时用于「能否扫」和日志说明，避免重复 fork mtr。
+	_, mtrErr := cfscan.MTRStatusCtx(ctx)
+	skipScan := cfg.SkipScan || mtrErr != nil
 	speedInput := ipsFile
 	if skipScan {
 		out.SkippedScan = true
-		if _, mtrErr := cfscan.MTRStatus(); mtrErr != nil {
+		if mtrErr != nil {
 			reporter.Warn("pipeline", "mtr 不可用（%v），已跳过 cfscan，直接测速", mtrErr)
 		} else {
 			reporter.Log("pipeline", "已按设置跳过 cfscan")
 		}
 	} else {
 		prefix := filepath.Join(runDir, tag)
-		scanWorkers := 16
 		scanRes, err := cfscan.Run(ctx, cfscan.Config{
 			InputFile:       ipsFile,
 			OutputPfx:       prefix,
 			HostHeader:      cfg.HostHeader,
-			Workers:         scanWorkers,
+			Workers:         cfcommon.PipelineScanWorkers,
 			HighQualityHops: cfg.HighQualityHops,
+			Keywords:        cfg.ScanKeywords,
 		}, reporter)
 		if err != nil {
 			return out, err
 		}
 		out.Scan = scanRes
-		if scanRes == nil || scanRes.QualityFile == "" || len(scanRes.Hits) == 0 {
-			return out, fmt.Errorf("cfscan 未产出质量 IP（命中 0），已停止测速，避免改测 cfdata 全量")
+		qualityFile, err := qualityFromScan(scanRes)
+		if err != nil {
+			return out, err
 		}
-		speedInput = scanRes.QualityFile
-		out.QualityFile = scanRes.QualityFile
+		speedInput = qualityFile
+		out.QualityFile = qualityFile
 	}
 	if ctx.Err() != nil {
 		return out, ctx.Err()
@@ -360,6 +392,9 @@ func ListRuns(runsDir string) ([]string, error) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entries[i].IsDir() {
 			names = append(names, entries[i].Name())
+			if len(names) >= cfcommon.MaxRunList {
+				break // /api/runs 不该把几百次历史一次全吐给浏览器
+			}
 		}
 	}
 	return names, nil
