@@ -8,15 +8,14 @@ services:
     restart: unless-stopped
     # 与镜像内 cftest 用户一致；Linux 上若 ./data 属主不同，在 .env 里覆盖。
     user: "${CFWEB_UID:-10001}:${CFWEB_GID:-10001}"
-    ports:
-      # 默认只监听宿主机回环，避免把无认证的 WebUI 直接暴露到公网。
-      # 需要从局域网访问时，在 .env 里设 CFWEB_BIND_IP=0.0.0.0（并收紧 CFWEB_ALLOW）。
-      - "${CFWEB_BIND_IP:-127.0.0.1}:${CFWEB_PORT:-8787}:8787"
+    # host 网络：容器直接使用宿主机网络栈，IPv4/IPv6 都可用，因此不再做端口映射。
+    # 监听地址由 CFWEB_ADDR 决定（默认回环，需局域网访问时设 0.0.0.0:8787）。
+    network_mode: host
+    command: ["cfweb", "-addr", "${CFWEB_ADDR:-127.0.0.1:8787}", "-root", "/data", "-open=false"]
     env_file:
       - path: .env
         required: false
     environment:
-      CFWEB_ADDR: 0.0.0.0:8787
       CFWEB_OPEN: "false"
       CFWEB_ROOT: /data
       # 默认仅允许局域网访问（回环 + 私有网段 + 本机网卡网段）。

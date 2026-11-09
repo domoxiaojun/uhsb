@@ -22,7 +22,7 @@ docker compose up -d --build
 
 打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)。运行产物在 `./data/runs/`。镜像以非 root 用户运行，`mtr` 靠文件 capability + `NET_RAW` 获得 raw socket 权限。
 
-**默认只把端口绑到宿主机回环**（`CFWEB_BIND_IP=127.0.0.1`）。要从局域网访问，在 `.env` 里设 `CFWEB_BIND_IP=0.0.0.0`，同时把 `CFWEB_ALLOW` 收紧到具体网段（如 `192.168.1.0/24`）。WebUI 默认只对**局域网**开放，公网来源（含公网网卡同网段）会被 403 拒绝；接口没有账号体系，请勿直接暴露到公网。`/api/status` 不会返回 `VMESS_UUID`，只告知前端“服务端已配置”；容器健康检查走 `/api/health`（不触发 mtr / sing-box 探测）。
+**容器使用 host 网络**，直接复用宿主机网络栈，IPv4/IPv6 都能测速。**默认只监听宿主机回环**（`CFWEB_ADDR=127.0.0.1:8787`）。要从局域网访问，在 `.env` 里设 `CFWEB_ADDR=0.0.0.0:8787`，同时把 `CFWEB_ALLOW` 收紧到具体网段（如 `192.168.1.0/24`）。WebUI 默认只对**局域网**开放，公网来源（含公网网卡同网段）会被 403 拒绝；接口没有账号体系，请勿直接暴露到公网。`/api/status` 不会返回 `VMESS_UUID`，只告知前端“服务端已配置”；容器健康检查走 `/api/health`（不触发 mtr / sing-box 探测）。
 
 Web 页面可直接设置：测速大小、最低 Mbps、最大丢包率、高跳数阈值（`-1` 关闭该启发式）、cfscan 路由关键字、TLS 与允许无效证书。阈值填 `0` 表示关闭该门槛，不会再被重置为默认值。**表单默认值由 `/api/status` 的 `defaults` 下发**，来源统一是 `internal/cfcommon/defaults.go`，改默认值只需改一处。
 
@@ -47,9 +47,7 @@ docker compose up -d
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `CFTEST_IMAGE` | `cftest:local` | compose 使用的镜像名（可设 GHCR 地址） |
-| `CFWEB_BIND_IP` | `127.0.0.1` | 宿主机端口绑定地址；局域网访问设 `0.0.0.0` |
-| `CFWEB_PORT` | `8787` | 宿主机端口 |
-| `CFWEB_ADDR` | `0.0.0.0:8787` | 容器内 WebUI 监听 |
+| `CFWEB_ADDR` | `127.0.0.1:8787` | WebUI 监听地址（host 网络，直接生效）；局域网访问设 `0.0.0.0:8787` |
 | `CFWEB_ROOT` | `/data` | 运行数据目录 |
 | `CFWEB_ALLOW` | `lan` | 允许访问的来源：`lan`(回环+私有网段+本机网卡) / `private` / `any` / 逗号分隔 CIDR；设 `any` 会在启动日志与页面顶部告警 |
 | `CFWEB_HOSTS` | 空 | 额外允许的 Host（逗号分隔）。用域名访问时必须配置，防 DNS rebinding |

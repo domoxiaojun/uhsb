@@ -48,7 +48,7 @@ go run ./cfweb -addr 127.0.0.1:8787 -root ./data -open=false
 - CSV 带 UTF-8 BOM。中断走 `HandleInterrupt`；`cfspeed` 交互菜单首次 Ctrl+C 取消当前测速而不是 `os.Exit`。
 - 四个 CLI 失败时设置 `exitCode=1`，`main` 的 defer 里 `os.Exit`。
 - `sing-box` 不编进 Go 模块，运行时 exec。每个候选 IP 一个临时 HTTP inbound，本地端口向系统动态申请；并发封顶 `singBoxMaxWorkers=6`。
-- Compose 默认 `127.0.0.1:8787:8787`（`CFWEB_BIND_IP` / `CFWEB_PORT` 可覆盖），日志 `json-file` 10m×3 轮转。IPv6 种子 `ips-v6.txt` 必须入库并被 Dockerfile 复制到 `/app`。
+- Compose 用 `network_mode: host`（容器直接使用宿主机 IPv4/IPv6，不再端口映射），监听地址由 `CFWEB_ADDR` 决定，默认 `127.0.0.1:8787`；日志 `json-file` 10m×3 轮转。IPv6 种子 `ips-v6.txt` 必须入库并被 Dockerfile 复制到 `/app`。
 - **凭据红线**：`TestResult.VMessURL` 带 `json:"-"`；SSE 只发 `resultEvent` 脱敏摘要；日志不打 `vmess://`；`*_vmess.txt` / `*_singbox.json` 用 `WriteLinesAtomicMode(..., 0600)`；`/api/files` 默认过滤并拒绝凭据产物（`CFWEB_EXPOSE_CREDENTIALS=true` 才放行），响应带 `Content-Disposition: attachment`。`isCredentialArtifact` 是唯一判定入口。
 - **来源校验**：`wrap` 对全部端点做 `requestFromAllowedOrigin`（Host 白名单 + `Sec-Fetch-Site` + sameOrigin）。Host 只放行 IP 字面量、localhost 和 `CFWEB_HOSTS`；用域名访问必须配 `CFWEB_HOSTS`，否则 403。`CFWEB_ALLOW=any` 会启动告警并在 `/api/status.insecure` 标记。
 - **进程生命周期**：cfweb 用 `http.Server`（`ReadHeaderTimeout`/`IdleTimeout`，不设 `WriteTimeout` 以保 SSE）+ `signal.NotifyContext(SIGINT,SIGTERM)` + `Shutdown`；`shutdownCh` 让 SSE 主动退出；`runPipeline` 必须带 `defer recover`。`singbox.Manager.procCtx` 是任务级 ctx，`session.close()` 调 `Manager.Close()` 兜底杀内核；`Instance.Close()` 有 3s 超时并返回 error。
